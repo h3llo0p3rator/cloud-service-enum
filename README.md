@@ -311,6 +311,28 @@ cse aws unauth s3 --bruteforce \
 cse aws unauth api-gateway --url https://app.example.com
 ```
 
+The same `unauth` shape is also wired up for Azure and GCP:
+
+```bash
+# Azure: crawl for *.core.windows.net accounts, probe every storage
+# surface (blob/file/queue/table/dfs) + common blob containers, and
+# secret-scan any public blobs.
+cse azure unauth storage --url https://app.example.com
+
+# Azure: wordlist bruteforce for storage-account names.
+cse azure unauth storage --bruteforce \
+  --bruteforce-prefix acme --bruteforce-prefix acmeprod
+
+# GCP: crawl for *.storage.googleapis.com buckets, probe metadata /
+# listing / IAM (metadata leaks projectNumber), secret-scan public
+# objects.
+cse gcp unauth bucket --url https://app.example.com
+
+# GCP: wordlist bruteforce for bucket names.
+cse gcp unauth bucket --bruteforce \
+  --bruteforce-prefix acme --bruteforce-prefix acme-prod
+```
+
 Full reference: [`docs/unauth-scans.md`](docs/unauth-scans.md).
 
 ### Azure

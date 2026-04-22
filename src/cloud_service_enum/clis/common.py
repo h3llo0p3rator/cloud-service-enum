@@ -108,6 +108,33 @@ def resolve_deep_flags(
     return effective_deep, effective_secret
 
 
+def unauth_crawler_options(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Click decorator adding the shared crawler knobs used by every
+    ``cse <provider> unauth <service>`` command.
+    """
+    fn = click.option(
+        "--max-pages", type=int, default=250, show_default=True,
+        help="Hard cap on URLs fetched in one crawl.",
+    )(fn)
+    fn = click.option(
+        "--max-concurrency", type=int, default=10, show_default=True,
+    )(fn)
+    fn = click.option(
+        "--timeout", "timeout_s", type=float, default=15.0, show_default=True,
+        help="Per-request HTTP timeout in seconds.",
+    )(fn)
+    fn = click.option(
+        "--user-agent",
+        default="cloud-service-enum/2.0 (+unauth)",
+        show_default=True,
+    )(fn)
+    fn = click.option(
+        "--scope-host", "extra_hosts", multiple=True,
+        help="Additional hostname to treat as in-scope (repeatable).",
+    )(fn)
+    return fn
+
+
 def report_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Click decorator adding ``--report-format`` and ``--output-dir``."""
     fn = click.option(

@@ -12,6 +12,7 @@ from cloud_service_enum.clis.common import (
     report_options,
     resolve_deep_flags,
     run_async,
+    unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
 from cloud_service_enum.core.registry import registry
@@ -171,35 +172,12 @@ def aws_unauth() -> None:  # noqa: D401
     pass
 
 
-def _crawler_options(fn):  # type: ignore[no-untyped-def]
-    """Shared crawler knobs for every ``aws unauth <service>`` command."""
-    fn = click.option(
-        "--max-pages", type=int, default=250, show_default=True,
-        help="Hard cap on URLs fetched in one run.",
-    )(fn)
-    fn = click.option(
-        "--max-concurrency", type=int, default=10, show_default=True,
-    )(fn)
-    fn = click.option(
-        "--timeout", "timeout_s", type=float, default=15.0, show_default=True,
-        help="Per-request HTTP timeout in seconds.",
-    )(fn)
-    fn = click.option(
-        "--user-agent", default="cloud-service-enum/2.0 (+unauth)", show_default=True,
-    )(fn)
-    fn = click.option(
-        "--scope-host", "extra_hosts", multiple=True,
-        help="Additional hostname to treat as in-scope (repeatable).",
-    )(fn)
-    return fn
-
-
 @aws_unauth.command(
     "cognito",
     help="Crawl a web app for Cognito user pool / identity pool / app client IDs.",
 )
 @click.option("--url", "target_url", required=True, help="Entry URL for the crawl.")
-@_crawler_options
+@unauth_crawler_options
 @click.option(
     "--probe/--no-probe",
     default=True,
@@ -269,7 +247,7 @@ def aws_unauth_cognito(
 )
 @click.option("--max-objects", type=int, default=100, show_default=True)
 @click.option("--max-object-size-kb", type=int, default=500, show_default=True)
-@_crawler_options
+@unauth_crawler_options
 @report_options
 def aws_unauth_s3(
     target_url: str | None,
@@ -328,7 +306,7 @@ def aws_unauth_s3(
     "--api-url", "api_urls", multiple=True,
     help="Probe this API endpoint directly (repeatable).",
 )
-@_crawler_options
+@unauth_crawler_options
 @report_options
 def aws_unauth_api_gateway(
     target_url: str | None,

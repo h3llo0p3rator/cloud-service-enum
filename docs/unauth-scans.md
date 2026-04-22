@@ -1,20 +1,32 @@
-# Unauthenticated AWS recon
+# Unauthenticated cloud recon
 
-Some AWS services leak attacker-useful identifiers through the
-client-side bundles of their consuming web apps. The `cse aws unauth`
-sub-tree wraps the recon flows for those leaks behind a single CLI:
-no AWS credentials are required.
+Some cloud services leak attacker-useful identifiers through the
+client-side bundles of their consuming web apps — or publish them to
+predictable public endpoints that don't require credentials to reach.
+The `cse <provider> unauth` sub-trees wrap those recon flows behind a
+single CLI: no cloud credentials are required on the scanner side.
 
-Three commands are currently wired up:
+Five commands are currently wired up across three providers:
 
-- [`cognito`](#cse-aws-unauth-cognito) — user / identity pool + client id hunt.
-- [`s3`](#cse-aws-unauth-s3) — bucket hunt, public-access probes, optional
-  wordlist bruteforce + object sampling.
-- [`api-gateway`](#cse-aws-unauth-api-gateway) — REST / HTTP / WebSocket
-  API Gateway + Lambda Function URL fingerprinting.
+- [`aws unauth cognito`](#cse-aws-unauth-cognito) — user / identity pool
+  + client id hunt.
+- [`aws unauth s3`](#cse-aws-unauth-s3) — bucket hunt, public-access
+  probes, optional wordlist bruteforce + object sampling.
+- [`aws unauth api-gateway`](#cse-aws-unauth-api-gateway) — REST / HTTP
+  / WebSocket API Gateway + Lambda Function URL fingerprinting.
+- [`azure unauth storage`](#cse-azure-unauth-storage) — storage-account
+  hunt across all five endpoints (blob / file / queue / table / dfs)
+  plus built-in blob-container probes and blob sampling.
+- [`gcp unauth bucket`](#cse-gcp-unauth-bucket) — GCS bucket hunt with
+  metadata / listing / IAM probes. The metadata response leaks the
+  owning `projectNumber`, which is the closest thing GCP has to S3
+  account-id attribution.
 
-All three share the same crawler + credential regex sweep: extraction
-regexes differ but the `--url` → crawl → extract pipeline is identical.
+Every command shares the same crawler + credential regex sweep:
+extraction regexes and probes differ per service, but the
+`--url` → crawl → extract pipeline is identical. The crawler knobs
+(`--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`,
+`--scope-host`) behave the same way in every command.
 
 ## `cse aws unauth cognito`
 
@@ -255,3 +267,222 @@ kinds:
   authorisation.
 - Request-body fuzzing and authenticated API Gateway introspection
   are out of scope for this command.
+
+## `cse azure unauth storage`
+
+Crawls a web app (optional) + probes a list of Azure storage accounts
+for public access across every service endpoint. Works in three input
+modes that compose freely:
+
+- `--url <URL>` — crawl the page and pull storage-account + container
+  references out of every text body. The extractor understands
+  `<acct>.<blob|file|queue|table|dfs>.core.windows.net`,
+  `<acct>.z<n>.web.core.windows.net` (static-website), and path-style
+  `<acct>.blob.core.windows.net/<container>` URLs.
+- `--account <NAME>` — probe a specific storage account. Repeatable.
+- `--bruteforce` — combine each `--bruteforce-prefix` with every
+  suffix in a wordlist. Azure storage-account names are alnum-only,
+  so candidates come out as `<prefix><suffix>`, `<suffix><prefix>`,
+  and `<prefix><1|2|3><suffix>`. Defaults to the bundled
+  `azure-storage-account-suffixes.txt`.
+
+```bash
+# Crawl + explicit accounts
+cse azure unauth storage --url https://app.example.com --account acmeprod
+
+# Bruteforce a shortlist of prefixes
+cse azure unauth storage \
+  --bruteforce --bruteforce-prefix acme --bruteforce-prefix acmeprod
+```
+
+### Account-level probes
+
+Every candidate account is probed across all five storage services
+(blob / file / queue / table / dfs) plus a small set of
+static-website zone hostnames:
+
+| Probe | HTTP call | What it flags |
+|-------|-----------|---------------|
+| Blob | `GET /?comp=list` against `*.blob.core.windows.net` | 200 + `<EnumerationResults>` → account-level blob listing is public. 400/403 with the Azure server banner → account exists but listing is denied. |
+| File | `GET /?comp=list` against `*.file.core.windows.net` | Same signal shape as blob. |
+| Queue | `GET /?comp=list` against `*.queue.core.windows.net` | Same signal shape as blob. |
+| Table | `GET /Tables` against `*.table.core.windows.net` | 400 `InvalidAuthenticationInfo` → table service exists. |
+| DFS (Data Lake Gen2) | `GET /?resource=account` against `*.dfs.core.windows.net` | Same signal shape as blob. |
+| Static website | `HEAD` against `*.z1…z36.web.core.windows.net` | Any Azure-server response → static hosting enabled. |
+
+An account is surfaced in the terminal output when **at least one**
+surface returned a definitive "service exists" response. DNS failures,
+TLS handshake failures, and anything else are treated as noise and
+suppressed — only actionable rows are rendered. Bruteforce counters
+still see every candidate.
+
+### Container-level probes
+
+Whenever an account exists, the runner additionally probes a small
+built-in wordlist of common container names
+(`backup`, `logs`, `prod`, `public`, `secrets`, `terraform`,
+`uploads`, `$web`, …) plus any containers surfaced by the crawl or
+supplied explicitly via `--container <acct>/<name>` or bare
+`--container <name>` (applied against every `--account`).
+
+| Probe | HTTP call | What it flags |
+|-------|-----------|---------------|
+| Public listing | `GET .../<container>?restype=container&comp=list&maxresults=100` | 200 + `<Blob>` entries → public listing. Captures the first N blob names. |
+| ACL | `GET .../<container>?restype=container&comp=acl` | 200 response reveals the `x-ms-blob-public-access` header (`blob` / `container` / `none`). |
+| Metadata | `GET .../<container>?restype=container` | 200 leaks `x-ms-meta-*` headers and `Last-Modified`. |
+
+Only containers with an actionable signal (public listing, 200
+metadata, or a public access level other than `none`) are rendered.
+
+### Blob sampling
+
+For every container with a public listing, text-like blobs (`.txt`,
+`.json`, `.env`, `.yaml`, `.ini`, `.sql`, …) are sampled with a capped
+`Range` request (`--max-blob-size-kb`, default 500 KB) and run through
+`core.secrets.scan_text`. Matches show up under the container's
+`secrets_found` panel and as a dedicated `storage_blob` resource for
+each file.
+
+### SAS token extraction
+
+Every crawled body is scanned for Azure SAS query-string patterns
+(`?sv=…&sig=…`). Any hit is rendered under a dedicated
+`sas_token_summary` resource with the signature portion redacted.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL to crawl for account / container references. |
+| `--account` | (none) | Explicit storage account (repeatable). |
+| `--container` | (none) | `<acct>/<container>` or bare `<container>` (repeatable). |
+| `--bruteforce` | off | Enable wordlist storage-account bruteforce. |
+| `--bruteforce-prefix` | (none) | Required when `--bruteforce` is on. Repeatable. |
+| `--bruteforce-wordlist` | bundled | Suffix wordlist path. |
+| `--bruteforce-container` | off | Replace the built-in container wordlist with `--container-wordlist`. |
+| `--container-wordlist` | (none) | Required with `--bruteforce-container`. |
+| `--max-blobs` | 100 | Max public blobs sampled per container. |
+| `--max-blob-size-kb` | 500 | Max bytes fetched per sampled blob. |
+| Crawler knobs | same as AWS commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url`, `--account`, or `--bruteforce` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-storage")` with these resource
+kinds:
+
+- `storage_account` — `name`, `surfaces` (comma-joined list of live
+  services), per-surface `*_list_public` / `*_exists` flags,
+  `static_website` URL, `first_seen_url`, `probes` summary.
+- `storage_container` — `account`, `container`, `public_list`,
+  `public_access_level`, `metadata_public`, `blobs_listed`,
+  `probes`, optional `secrets_found`.
+- `storage_blob` — per sampled blob: `account`, `container`, `key`,
+  `size`, `bytes_scanned`, `secret_count`.
+- `sas_token_summary` — every leaked SAS token (signatures redacted).
+- `crawl_summary` — when `--url` was supplied.
+- `bruteforce_summary` — when `--bruteforce` was supplied.
+
+### Safety notes
+
+- Every probe is an anonymous `GET` / `HEAD` — no writes, no deletes.
+- Probes show up in the target account's Storage Analytics logs as
+  anonymous `ListBlobs` / `GetContainerProperties` / `GetACL` events.
+  Bruteforce is noisy by construction — don't run it against estates
+  you don't own without authorisation.
+- SAS tokens are reported with their signatures redacted. They are
+  never re-used by the tool, even when they look valid.
+
+## `cse gcp unauth bucket`
+
+Crawls a web app (optional) + probes a list of GCS buckets for public
+metadata, listing, and IAM exposure. Works in three input modes that
+compose freely:
+
+- `--url <URL>` — crawl the page and pull bucket names out of every
+  text body (`<bucket>.storage.googleapis.com`,
+  `storage.googleapis.com/<bucket>`, `gs://<bucket>`,
+  Firebase `<bucket>.appspot.com`).
+- `--bucket <NAME>` — probe one bucket directly. Repeatable.
+- `--bruteforce` — combine each `--bruteforce-prefix` with every
+  suffix in a wordlist. GCS permits `_`, so candidates come out as
+  `<p>-<s>`, `<p>.<s>`, `<p><s>`, `<p>_<s>`, and `<s>-<p>`.
+  Defaults to the bundled `gcs-bucket-suffixes.txt`.
+
+```bash
+# Crawl + explicit bucket
+cse gcp unauth bucket --url https://app.example.com --bucket acme-assets
+
+# Small bruteforce pass
+cse gcp unauth bucket \
+  --bruteforce --bruteforce-prefix acme --bruteforce-prefix acme-prod
+```
+
+### Probes per bucket
+
+Every candidate bucket gets the same probe suite against the public
+GCS JSON API (all anonymous, all read-only):
+
+| Probe | HTTP call | What it flags |
+|-------|-----------|---------------|
+| Metadata | `GET /storage/v1/b/<bucket>` | 200 exposes **`projectNumber`** (the owning project — the GCP equivalent of S3's missing account-id attribution), `location`, `storageClass`, `iamConfiguration.uniformBucketLevelAccess`, `website.mainPageSuffix`, `cors`. 404 → bucket doesn't exist. 401/403 → bucket exists but metadata is locked down. |
+| Public list | `GET /storage/v1/b/<bucket>/o?maxResults=100` | 200 → anonymous listing allowed. Captures the first N object names. |
+| IAM policy | `GET /storage/v1/b/<bucket>/iam` | 200 → public IAM read. Flags `allUsers` / `allAuthenticatedUsers` bindings explicitly; full binding list is rendered via the existing role-binding panel. |
+| Website | `GET https://<bucket>.storage.googleapis.com/` | 200/301/302 → bucket-backed website enabled. |
+| CORS | Captured from the metadata response. | Wildcard `Origin: *` rules are flagged. |
+
+Only buckets with an authoritative "exists" response are surfaced in
+the terminal. Everything else (DNS failures, 404s, TLS errors) is
+suppressed — bruteforce counters still see every candidate.
+
+### Object sampling
+
+For every bucket that permits anonymous listing, text-like objects
+are sampled with a capped `Range` request (`--max-object-size-kb`,
+default 500 KB) and run through `core.secrets.scan_text`. Matches show
+up under the bucket's `secrets_found` panel and as a dedicated
+`gcs_object` resource for each file.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL to crawl for bucket references. |
+| `--bucket` | (none) | Explicit bucket to probe (repeatable). |
+| `--bruteforce` | off | Enable wordlist bucket-name enumeration. |
+| `--bruteforce-prefix` | (none) | Required when `--bruteforce` is on. Repeatable. |
+| `--bruteforce-wordlist` | bundled | Suffix wordlist path. |
+| `--max-objects` | 100 | Max public objects sampled per bucket. |
+| `--max-object-size-kb` | 500 | Max bytes fetched per sampled object. |
+| Crawler knobs | same as AWS / Azure commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url`, `--bucket`, or `--bruteforce` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-bucket")` with these resource
+kinds:
+
+- `gcs_bucket` — `name`, `project_number`, `location`,
+  `storage_class`, `uniform_access`, `public_list`, `public_iam`,
+  `website`, `website_main_page`, `cors_wildcard`,
+  `cors_credentials`, `first_seen_url`, `probes` summary, optional
+  `iam_bindings` (rendered via the role-binding panel) and
+  `secrets_found`.
+- `gcs_object` — per sampled object: `bucket`, `key`, `size`,
+  `bytes_scanned`, `secret_count`.
+- `crawl_summary` — when `--url` was supplied.
+- `bruteforce_summary` — when `--bruteforce` was supplied.
+
+### Safety notes
+
+- All probes are anonymous `GET` requests — no writes, no deletes.
+- Probes show up in the target project's GCS access logs and in any
+  Data Access audit log destinations that capture bucket metadata
+  reads. Bruteforce is noisy — don't run it against estates you don't
+  own without authorisation.
+- The IAM probe deliberately stops at reading the policy document.
+  It never attempts to evaluate whether a given role grants anything
+  useful to the scanning principal — that's the authenticated scan's
+  job.

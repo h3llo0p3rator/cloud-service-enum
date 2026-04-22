@@ -1,6 +1,8 @@
-"""Azure sub-command group: ``cse azure enumerate`` and ``cse azure mfa``."""
+"""Azure sub-command group: ``cse azure enumerate``, ``mfa``, ``unauth``."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import click
 
@@ -10,6 +12,7 @@ from cloud_service_enum.clis.common import (
     report_options,
     resolve_deep_flags,
     run_async,
+    unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
 from cloud_service_enum.core.registry import registry
@@ -227,3 +230,110 @@ def azure_services() -> None:
 
     for name in registry.names(Provider.AZURE):
         click.echo(name)
+
+
+@azure.group("unauth", help="Unauthenticated recon against Azure-backed surfaces.")
+def azure_unauth() -> None:  # noqa: D401
+    pass
+
+
+@azure_unauth.command(
+    "storage",
+    help="Probe Azure storage accounts + blob containers (optional URL crawl + bruteforce).",
+)
+@click.option(
+    "--url", "target_url", default=None,
+    help="Crawl this URL and extract storage-account / container references.",
+)
+@click.option(
+    "--account", "accounts", multiple=True,
+    help="Probe this storage account directly (repeatable).",
+)
+@click.option(
+    "--container", "containers", multiple=True,
+    help=(
+        "Probe this container. Accepts ``<account>/<container>`` or a bare "
+        "``<container>`` name (applied against every --account)."
+    ),
+)
+@click.option(
+    "--bruteforce", is_flag=True, default=False,
+    help="Enable wordlist storage-account bruteforce.",
+)
+@click.option(
+    "--bruteforce-prefix", "bruteforce_prefixes", multiple=True,
+    help="Prefix combined with each suffix wordlist entry (repeatable).",
+)
+@click.option(
+    "--bruteforce-wordlist",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Suffix wordlist; defaults to the bundled azure-storage-account-suffixes.txt.",
+)
+@click.option(
+    "--bruteforce-container", is_flag=True, default=False,
+    help="Use --container-wordlist instead of the built-in ~25 common container names.",
+)
+@click.option(
+    "--container-wordlist",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Container wordlist (requires --bruteforce-container).",
+)
+@click.option("--max-blobs", type=int, default=100, show_default=True)
+@click.option("--max-blob-size-kb", type=int, default=500, show_default=True)
+@unauth_crawler_options
+@report_options
+def azure_unauth_storage(
+    target_url: str | None,
+    accounts: tuple[str, ...],
+    containers: tuple[str, ...],
+    bruteforce: bool,
+    bruteforce_prefixes: tuple[str, ...],
+    bruteforce_wordlist: Path | None,
+    bruteforce_container: bool,
+    container_wordlist: Path | None,
+    max_blobs: int,
+    max_blob_size_kb: int,
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not accounts and not bruteforce:
+        raise click.UsageError(
+            "Provide at least one of --url, --account, or --bruteforce."
+        )
+    if bruteforce and not bruteforce_prefixes:
+        raise click.UsageError(
+            "--bruteforce requires at least one --bruteforce-prefix."
+        )
+    if bruteforce_container and not container_wordlist:
+        raise click.UsageError(
+            "--bruteforce-container requires --container-wordlist."
+        )
+
+    from cloud_service_enum.azure.unauth import StorageUnauthScope, run_storage_unauth
+
+    scope = StorageUnauthScope(
+        target_url=target_url,
+        accounts=tuple(accounts),
+        containers=tuple(containers),
+        bruteforce=bruteforce,
+        bruteforce_prefixes=tuple(bruteforce_prefixes),
+        bruteforce_wordlist=bruteforce_wordlist,
+        bruteforce_container=bruteforce_container,
+        container_wordlist=container_wordlist,
+        max_blobs=max_blobs,
+        max_blob_size_kb=max_blob_size_kb,
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_storage_unauth(scope))
+    emit_reports(run, output_dir, report_formats)

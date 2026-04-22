@@ -1,6 +1,8 @@
-"""GCP sub-command group: ``cse gcp enumerate``."""
+"""GCP sub-command group: ``cse gcp enumerate`` and ``cse gcp unauth``."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import click
 
@@ -10,6 +12,7 @@ from cloud_service_enum.clis.common import (
     report_options,
     resolve_deep_flags,
     run_async,
+    unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
 from cloud_service_enum.core.registry import registry
@@ -104,3 +107,83 @@ def _split(values: tuple[str, ...]) -> list[str]:
     for v in values:
         out.extend(part.strip() for part in v.split(",") if part.strip())
     return out
+
+
+@gcp.group("unauth", help="Unauthenticated recon against GCP-backed surfaces.")
+def gcp_unauth() -> None:  # noqa: D401
+    pass
+
+
+@gcp_unauth.command(
+    "bucket",
+    help="Probe GCS buckets for public metadata / listing / IAM (optional URL crawl + bruteforce).",
+)
+@click.option(
+    "--url", "target_url", default=None,
+    help="Crawl this URL and extract GCS bucket references.",
+)
+@click.option(
+    "--bucket", "buckets", multiple=True,
+    help="Probe this bucket directly (repeatable).",
+)
+@click.option(
+    "--bruteforce", is_flag=True, default=False,
+    help="Enable wordlist bucket-name enumeration.",
+)
+@click.option(
+    "--bruteforce-prefix", "bruteforce_prefixes", multiple=True,
+    help="Prefix combined with each suffix wordlist entry (repeatable).",
+)
+@click.option(
+    "--bruteforce-wordlist",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Suffix wordlist; defaults to the bundled gcs-bucket-suffixes.txt.",
+)
+@click.option("--max-objects", type=int, default=100, show_default=True)
+@click.option("--max-object-size-kb", type=int, default=500, show_default=True)
+@unauth_crawler_options
+@report_options
+def gcp_unauth_bucket(
+    target_url: str | None,
+    buckets: tuple[str, ...],
+    bruteforce: bool,
+    bruteforce_prefixes: tuple[str, ...],
+    bruteforce_wordlist: Path | None,
+    max_objects: int,
+    max_object_size_kb: int,
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not buckets and not bruteforce:
+        raise click.UsageError(
+            "Provide at least one of --url, --bucket, or --bruteforce."
+        )
+    if bruteforce and not bruteforce_prefixes:
+        raise click.UsageError(
+            "--bruteforce requires at least one --bruteforce-prefix."
+        )
+
+    from cloud_service_enum.gcp.unauth import BucketUnauthScope, run_bucket_unauth
+
+    scope = BucketUnauthScope(
+        target_url=target_url,
+        buckets=tuple(buckets),
+        bruteforce=bruteforce,
+        bruteforce_prefixes=tuple(bruteforce_prefixes),
+        bruteforce_wordlist=bruteforce_wordlist,
+        max_objects=max_objects,
+        max_object_size_kb=max_object_size_kb,
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_bucket_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
