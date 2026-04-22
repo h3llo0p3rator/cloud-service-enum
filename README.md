@@ -283,10 +283,12 @@ cse aws enumerate \
 
 #### Unauthenticated recon
 
-Some services (starting with Cognito) leak attacker-useful identifiers
-through the client-side bundles of their consuming web apps. The
-`aws unauth` sub-tree wraps recon flows for those leaks — no AWS
-credentials required.
+A lot of AWS services leak attacker-useful identifiers through the
+client-side bundles of their consuming web apps. The `aws unauth`
+sub-tree wraps recon flows for those leaks — no AWS credentials
+required. Three commands are wired up today: `cognito`, `s3`, and
+`api-gateway`. They share the same crawler and credential regex sweep,
+so you can point them at the same `--url` and the results will line up.
 
 ```bash
 # Crawl a web app, pull userPoolIds / identityPoolIds / appClientIds
@@ -297,6 +299,16 @@ cse aws unauth cognito --url https://app.example.com
 # Add the opt-in SignUp probe to detect self-registration
 # (no user is actually created).
 cse aws unauth cognito --url https://app.example.com --probe-signup
+
+# Probe an explicit bucket + whatever the crawler finds at the target URL.
+cse aws unauth s3 --url https://app.example.com --bucket acme-assets
+
+# Add a small wordlist bruteforce pass using two prefixes.
+cse aws unauth s3 --bruteforce \
+  --bruteforce-prefix acme --bruteforce-prefix acme-prod
+
+# Fingerprint every API Gateway / Lambda Function URL the web app references.
+cse aws unauth api-gateway --url https://app.example.com
 ```
 
 Full reference: [`docs/unauth-scans.md`](docs/unauth-scans.md).

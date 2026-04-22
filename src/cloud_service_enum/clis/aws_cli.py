@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from cloud_service_enum.clis.common import (
@@ -169,19 +171,35 @@ def aws_unauth() -> None:  # noqa: D401
     pass
 
 
+def _crawler_options(fn):  # type: ignore[no-untyped-def]
+    """Shared crawler knobs for every ``aws unauth <service>`` command."""
+    fn = click.option(
+        "--max-pages", type=int, default=250, show_default=True,
+        help="Hard cap on URLs fetched in one run.",
+    )(fn)
+    fn = click.option(
+        "--max-concurrency", type=int, default=10, show_default=True,
+    )(fn)
+    fn = click.option(
+        "--timeout", "timeout_s", type=float, default=15.0, show_default=True,
+        help="Per-request HTTP timeout in seconds.",
+    )(fn)
+    fn = click.option(
+        "--user-agent", default="cloud-service-enum/2.0 (+unauth)", show_default=True,
+    )(fn)
+    fn = click.option(
+        "--scope-host", "extra_hosts", multiple=True,
+        help="Additional hostname to treat as in-scope (repeatable).",
+    )(fn)
+    return fn
+
+
 @aws_unauth.command(
     "cognito",
     help="Crawl a web app for Cognito user pool / identity pool / app client IDs.",
 )
 @click.option("--url", "target_url", required=True, help="Entry URL for the crawl.")
-@click.option("--max-pages", type=int, default=250, show_default=True,
-              help="Hard cap on URLs fetched in one run.")
-@click.option("--max-concurrency", type=int, default=10, show_default=True)
-@click.option("--timeout", "timeout_s", type=float, default=15.0, show_default=True,
-              help="Per-request HTTP timeout in seconds.")
-@click.option("--user-agent", default="cloud-service-enum/2.0 (+unauth)", show_default=True)
-@click.option("--scope-host", "extra_hosts", multiple=True,
-              help="Additional hostname to treat as in-scope (repeatable).")
+@_crawler_options
 @click.option(
     "--probe/--no-probe",
     default=True,
@@ -220,6 +238,127 @@ def aws_unauth_cognito(
         probe_signup=probe_signup,
     )
     run = run_async(run_cognito_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
+@aws_unauth.command(
+    "s3",
+    help="Probe S3 buckets for public access, optional bruteforce + object scan.",
+)
+@click.option(
+    "--url", "target_url", default=None,
+    help="Crawl this URL and extract bucket references.",
+)
+@click.option(
+    "--bucket", "buckets", multiple=True,
+    help="Probe this bucket directly (repeatable).",
+)
+@click.option(
+    "--bruteforce", is_flag=True, default=False,
+    help="Enable wordlist bucket-name enumeration.",
+)
+@click.option(
+    "--bruteforce-prefix", "bruteforce_prefixes", multiple=True,
+    help="Prefix(es) combined with each wordlist entry (repeatable).",
+)
+@click.option(
+    "--bruteforce-wordlist",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="Suffix wordlist; defaults to the bundled s3-bucket-suffixes.txt.",
+)
+@click.option("--max-objects", type=int, default=100, show_default=True)
+@click.option("--max-object-size-kb", type=int, default=500, show_default=True)
+@_crawler_options
+@report_options
+def aws_unauth_s3(
+    target_url: str | None,
+    buckets: tuple[str, ...],
+    bruteforce: bool,
+    bruteforce_prefixes: tuple[str, ...],
+    bruteforce_wordlist: Path | None,
+    max_objects: int,
+    max_object_size_kb: int,
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not buckets and not bruteforce:
+        raise click.UsageError(
+            "Provide at least one of --url, --bucket, or --bruteforce."
+        )
+    if bruteforce and not bruteforce_prefixes:
+        raise click.UsageError(
+            "--bruteforce requires at least one --bruteforce-prefix."
+        )
+
+    from cloud_service_enum.aws.unauth import S3UnauthScope, run_s3_unauth
+
+    scope = S3UnauthScope(
+        target_url=target_url,
+        buckets=tuple(buckets),
+        bruteforce=bruteforce,
+        bruteforce_prefixes=tuple(bruteforce_prefixes),
+        bruteforce_wordlist=bruteforce_wordlist,
+        max_objects=max_objects,
+        max_object_size_kb=max_object_size_kb,
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_s3_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
+@aws_unauth.command(
+    "api-gateway",
+    help="Probe API Gateway endpoints and Lambda Function URLs.",
+)
+@click.option(
+    "--url", "target_url", default=None,
+    help="Crawl this URL and extract API Gateway / Lambda URL references.",
+)
+@click.option(
+    "--api-url", "api_urls", multiple=True,
+    help="Probe this API endpoint directly (repeatable).",
+)
+@_crawler_options
+@report_options
+def aws_unauth_api_gateway(
+    target_url: str | None,
+    api_urls: tuple[str, ...],
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not api_urls:
+        raise click.UsageError("Provide at least one of --url or --api-url.")
+
+    from cloud_service_enum.aws.unauth import (
+        ApiGatewayUnauthScope,
+        run_api_gateway_unauth,
+    )
+
+    scope = ApiGatewayUnauthScope(
+        target_url=target_url,
+        api_urls=tuple(api_urls),
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_api_gateway_unauth(scope))
     emit_reports(run, output_dir, report_formats)
 
 
