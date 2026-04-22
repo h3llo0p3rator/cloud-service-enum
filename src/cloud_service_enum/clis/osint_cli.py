@@ -10,13 +10,19 @@ from cloud_service_enum.clis.common import emit_reports, report_options, run_asy
 from cloud_service_enum.osint import OsintScope, run_osint
 
 
-@click.command("osint", help="Discover subdomains, DNS records, and cloud-provider hints for a domain.")
+@click.command(
+    "osint",
+    help="Discover subdomains, attribute IPs to cloud providers, and probe Azure tenant info.",
+)
 @click.argument("domain")
 @click.option("--wordlist", type=click.Path(dir_okay=False, exists=True), help="Subdomain wordlist.")
 @click.option("--max-concurrency", type=int, default=40, show_default=True)
-@click.option("--timeout", "timeout_s", type=float, default=10.0, show_default=True)
-@click.option("--no-ct", is_flag=True, help="Skip certificate-transparency log query.")
-@click.option("--no-whois", is_flag=True, help="Skip WHOIS lookup.")
+@click.option("--timeout", "timeout_s", type=float, default=15.0, show_default=True)
+@click.option("--skip-brute", is_flag=True, help="Skip the wordlist brute-force phase.")
+@click.option("--no-ct", is_flag=True, help="Skip Certificate Transparency log queries.")
+@click.option("--no-rdap", is_flag=True, help="Skip RDAP IP-ownership lookups.")
+@click.option("--no-tenant", is_flag=True, help="Skip the Azure tenant-id probe.")
+@click.option("--whois", "do_whois", is_flag=True, help="Include domain WHOIS in the JSON report.")
 @click.option("--ssl-inspect", is_flag=True, help="Inspect leaf certificates on TCP/443 (slow).")
 @click.option("--extra", "extras", multiple=True, help="Additional hostnames to force-include.")
 @report_options
@@ -25,8 +31,11 @@ def osint(
     wordlist: str | None,
     max_concurrency: int,
     timeout_s: float,
+    skip_brute: bool,
     no_ct: bool,
-    no_whois: bool,
+    no_rdap: bool,
+    no_tenant: bool,
+    do_whois: bool,
     ssl_inspect: bool,
     extras: tuple[str, ...],
     output_dir: Path,
@@ -40,8 +49,11 @@ def osint(
         wordlist=words,
         max_concurrency=max_concurrency,
         http_timeout_s=timeout_s,
+        brute_force=not skip_brute,
         ct_logs=not no_ct,
-        whois=not no_whois,
+        rdap=not no_rdap,
+        azure_tenant=not no_tenant,
+        whois=do_whois,
         ssl_inspect=ssl_inspect,
         extra_hostnames=list(extras),
     )
