@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.tox/
+.nox/
+.python-version
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Cloud credentials & test artefacts
+sa.json
+auditor.json
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+output/
+reports/
+subdomains
+test_wordlist.txt
