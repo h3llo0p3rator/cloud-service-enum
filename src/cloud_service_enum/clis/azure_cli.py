@@ -104,11 +104,38 @@ def azure_enumerate(
     emit_reports(run, output_dir, report_formats)
 
 
-@azure.command("mfa", help="Enumerate Microsoft Graph users and their MFA status.")
+@azure.command(
+    "mfa",
+    help=(
+        "MFA tooling. Without an argument: enumerate every user's MFA "
+        "registration status via Microsoft Graph. With a UPN: probe that "
+        "user against multiple Microsoft auth endpoints to detect "
+        "single-factor (MFA-bypass) access."
+    ),
+)
+@click.argument("user", required=False)
 @_auth_options
+@click.option(
+    "--mfa-password",
+    "mfa_password",
+    help="Password to test in the MFA sweep (interactive prompt if omitted).",
+)
+@click.option(
+    "--mfa-tenant",
+    "mfa_tenant",
+    default=None,
+    help="Tenant id/host for the sweep (default: organizations).",
+)
+@click.option(
+    "--yes",
+    "skip_confirm",
+    is_flag=True,
+    help="Skip the lockout confirmation prompt (non-interactive use).",
+)
 @click.option("--no-progress", is_flag=True)
 @report_options
 def azure_mfa(
+    user: str | None,
     tenant_id: str | None,
     client_id: str | None,
     client_secret: str | None,
@@ -120,10 +147,24 @@ def azure_mfa(
     use_managed_identity: bool,
     use_cli: bool,
     subscription_id: str | None,
+    mfa_password: str | None,
+    mfa_tenant: str | None,
+    skip_confirm: bool,
     no_progress: bool,
     output_dir,  # type: ignore[no-untyped-def]
     report_formats: tuple[str, ...],
 ) -> None:
+    if user:
+        _run_mfa_sweep(
+            upn=user,
+            password=mfa_password,
+            tenant=mfa_tenant or tenant_id or "organizations",
+            skip_confirm=skip_confirm,
+            output_dir=output_dir,
+            report_formats=report_formats,
+        )
+        return
+
     auth = _build_auth(
         tenant_id=tenant_id,
         client_id=client_id,
@@ -143,6 +184,40 @@ def azure_mfa(
         max_concurrency=4,
     )
     run = run_async(run_provider(Provider.AZURE, auth, scope, show_progress=not no_progress))
+    emit_reports(run, output_dir, report_formats)
+
+
+def _run_mfa_sweep(
+    *,
+    upn: str,
+    password: str | None,
+    tenant: str,
+    skip_confirm: bool,
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    from cloud_service_enum.azure.mfa_sweep import MfaSweepScope, run_mfa_sweep
+
+    click.secho(
+        f"MFA sweep for user: {upn}",
+        fg="cyan",
+        bold=True,
+    )
+    click.secho(
+        "This will issue several authentication requests against Microsoft "
+        "endpoints. A wrong password may count toward the account lockout "
+        "threshold.",
+        fg="yellow",
+    )
+    if not skip_confirm and not click.confirm("Continue?", default=True):
+        click.echo("Aborted.")
+        return
+
+    if not password:
+        password = click.prompt(f"Password for {upn}", hide_input=True)
+
+    scope = MfaSweepScope(upn=upn, password=password, tenant=tenant)
+    run = run_async(run_mfa_sweep(scope))
     emit_reports(run, output_dir, report_formats)
 
 
