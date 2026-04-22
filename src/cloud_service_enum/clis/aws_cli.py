@@ -164,6 +164,65 @@ def aws_services() -> None:
         click.echo(name)
 
 
+@aws.group("unauth", help="Unauthenticated recon against public cloud-backed web apps.")
+def aws_unauth() -> None:  # noqa: D401
+    pass
+
+
+@aws_unauth.command(
+    "cognito",
+    help="Crawl a web app for Cognito user pool / identity pool / app client IDs.",
+)
+@click.option("--url", "target_url", required=True, help="Entry URL for the crawl.")
+@click.option("--max-pages", type=int, default=250, show_default=True,
+              help="Hard cap on URLs fetched in one run.")
+@click.option("--max-concurrency", type=int, default=10, show_default=True)
+@click.option("--timeout", "timeout_s", type=float, default=15.0, show_default=True,
+              help="Per-request HTTP timeout in seconds.")
+@click.option("--user-agent", default="cloud-service-enum/2.0 (+unauth)", show_default=True)
+@click.option("--scope-host", "extra_hosts", multiple=True,
+              help="Additional hostname to treat as in-scope (repeatable).")
+@click.option(
+    "--probe/--no-probe",
+    default=True,
+    show_default=True,
+    help="Run safe read-only Cognito probes (GetId, InitiateAuth) on every hit.",
+)
+@click.option(
+    "--probe-signup",
+    is_flag=True,
+    default=False,
+    help="Also probe SignUp to detect self-registration (no user is created).",
+)
+@report_options
+def aws_unauth_cognito(
+    target_url: str,
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    probe: bool,
+    probe_signup: bool,
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    from cloud_service_enum.aws.unauth import CognitoUnauthScope, run_cognito_unauth
+
+    scope = CognitoUnauthScope(
+        target_url=target_url,
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+        probe=probe,
+        probe_signup=probe_signup,
+    )
+    run = run_async(run_cognito_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
 def _split(values: tuple[str, ...]) -> list[str]:
     items: list[str] = []
     for v in values:

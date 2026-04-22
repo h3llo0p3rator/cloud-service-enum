@@ -281,6 +281,26 @@ cse aws enumerate \
   --report-format json --report-format xlsx
 ```
 
+#### Unauthenticated recon
+
+Some services (starting with Cognito) leak attacker-useful identifiers
+through the client-side bundles of their consuming web apps. The
+`aws unauth` sub-tree wraps recon flows for those leaks — no AWS
+credentials required.
+
+```bash
+# Crawl a web app, pull userPoolIds / identityPoolIds / appClientIds
+# from its JS bundles, then fingerprint each pool via the public
+# Cognito API (read-only probes, on by default).
+cse aws unauth cognito --url https://app.example.com
+
+# Add the opt-in SignUp probe to detect self-registration
+# (no user is actually created).
+cse aws unauth cognito --url https://app.example.com --probe-signup
+```
+
+Full reference: [`docs/unauth-scans.md`](docs/unauth-scans.md).
+
 ### Azure
 
 ```bash
