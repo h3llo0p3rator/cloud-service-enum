@@ -15,6 +15,7 @@ from cloud_service_enum.clis.common import (
     unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
+from cloud_service_enum.core.output import get_console
 from cloud_service_enum.core.registry import registry
 from cloud_service_enum.core.runner import run_provider
 
@@ -123,9 +124,7 @@ def aws_enumerate(
     auth = AwsAuthenticator(cfg)
 
     async def _go():  # type: ignore[no-untyped-def]
-        region_list = _split(regions)
-        if not region_list:
-            region_list = await auth.list_regions()
+        region_list = await _resolve_regions(auth, region, _split(regions))
         explicit_services = _split(services)
         effective_deep, effective_secret = resolve_deep_flags(
             services=explicit_services,
@@ -165,6 +164,102 @@ def aws_services() -> None:
 
     for name in registry.names(Provider.AWS):
         click.echo(name)
+
+
+@aws.command(
+    "probe-assume",
+    help=(
+        "Actively probe sts:AssumeRole against candidate role ARNs. "
+        "Ground truth for 'what can this token actually assume right now?'."
+    ),
+)
+@_auth_options
+@click.option(
+    "--target",
+    "probe_role_arns",
+    multiple=True,
+    help="Candidate role ARN to probe (repeatable or comma-separated).",
+)
+@click.option(
+    "--target-file",
+    "probe_role_arn_file",
+    type=click.Path(dir_okay=False, exists=True, path_type=Path),
+    default=None,
+    help="File containing one candidate role ARN per line (# comments allowed).",
+)
+@click.option(
+    "--target-external-id",
+    "probe_external_id",
+    default=None,
+    help="External ID to pass to every probed AssumeRole call.",
+)
+@click.option(
+    "--session-name",
+    default="cse-probe-assume",
+    show_default=True,
+    help="Session name used for every successful AssumeRole.",
+)
+@click.option(
+    "--duration-seconds",
+    type=int,
+    default=900,
+    show_default=True,
+    help="Requested session duration (900–3600; clamped to role's maximum).",
+)
+@click.option("--max-concurrency", type=int, default=10, show_default=True)
+@click.option("--timeout", "timeout_s", type=float, default=30.0, show_default=True)
+@report_options
+def aws_probe_assume(
+    profile: str | None,
+    region: str | None,
+    access_key: str | None,
+    secret_key: str | None,
+    session_token: str | None,
+    role_arn: str | None,
+    external_id: str | None,
+    mfa_serial: str | None,
+    mfa_token: str | None,
+    web_identity_token_file: str | None,
+    probe_role_arns: tuple[str, ...],
+    probe_role_arn_file: Path | None,
+    probe_external_id: str | None,
+    session_name: str,
+    duration_seconds: int,
+    max_concurrency: int,
+    timeout_s: float,
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    from cloud_service_enum.aws.probe_assume import (
+        ProbeAssumeScope,
+        load_role_arns,
+        run_probe_assume,
+    )
+
+    arns = load_role_arns(probe_role_arns, path=probe_role_arn_file)
+    if not arns:
+        raise click.UsageError(
+            "Provide at least one candidate via --target or --target-file."
+        )
+
+    scope = ProbeAssumeScope(
+        role_arns=tuple(arns),
+        external_id=probe_external_id,
+        session_name=session_name,
+        duration_seconds=duration_seconds,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        profile=profile,
+        region=region,
+        access_key=access_key,
+        secret_key=secret_key,
+        session_token=session_token,
+        role_arn=role_arn,
+        web_identity_token_file=web_identity_token_file,
+    )
+    _ = (external_id, mfa_serial, mfa_token)  # absorbed via shared option set
+    run = run_async(run_probe_assume(scope))
+    emit_reports(run, output_dir, report_formats)
 
 
 @aws.group("unauth", help="Unauthenticated recon against public cloud-backed web apps.")
@@ -345,3 +440,36 @@ def _split(values: tuple[str, ...]) -> list[str]:
     for v in values:
         items.extend(part.strip() for part in v.split(",") if part.strip())
     return items
+
+
+async def _resolve_regions(
+    auth, single_region: str | None, explicit: list[str]
+) -> list[str]:
+    """Pick the region list to enumerate against without ever hard-failing.
+
+    Priority order:
+
+    1. ``--regions`` is honoured verbatim.
+    2. ``--region`` falls through as a single-region scope (and avoids
+       the ``ec2:DescribeRegions`` call entirely).
+    3. Otherwise we try ``DescribeRegions`` and, if the principal lacks
+       that permission, warn and fall back to :data:`FALLBACK_REGIONS`
+       so global services (IAM, STS, Organizations, …) still run.
+    """
+    from cloud_service_enum.aws.auth import FALLBACK_REGIONS
+
+    if explicit:
+        return explicit
+    if single_region:
+        return [single_region]
+    try:
+        return await auth.list_regions()
+    except Exception as exc:  # noqa: BLE001
+        console = get_console()
+        console.print(
+            f"[warning]warning:[/warning] could not list regions via ec2:DescribeRegions "
+            f"([muted]{type(exc).__name__}[/muted]); falling back to a canonical "
+            f"{len(FALLBACK_REGIONS)}-region set. Pass [info]--regions[/info] to "
+            f"override."
+        )
+        return list(FALLBACK_REGIONS)

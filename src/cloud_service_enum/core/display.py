@@ -116,12 +116,22 @@ def render_config(
 
 
 _AUTH_ERROR_HINTS: tuple[str, ...] = (
+    # Azure / Graph
     "AuthorizationFailed",
     "Authorization_RequestDenied",
-    "AccessDenied",
-    "PermissionDenied",
+    # GCP
     "permission_denied",
     "IAM_PERMISSION_DENIED",
+    # AWS — error codes. ``AuthorizationError``/``AuthorizationErrorException``
+    # are what SNS raises; ``UnauthorizedOperation`` is EC2/VPC; ``AccessDenied``
+    # is the universal STS/IAM shape.
+    "AccessDenied",
+    "AuthorizationError",
+    "UnauthorizedOperation",
+    "PermissionDenied",
+    # Message substrings that appear across providers regardless of code
+    "not authorized to perform",
+    "is not authorized",
     "insufficient privileges",
     "required scopes are missing",
     "does not have authorization",
@@ -129,6 +139,8 @@ _AUTH_ERROR_HINTS: tuple[str, ...] = (
     "you don't have permission",
     "403 ",
     "Forbidden",
+    # Optional-SDK fallthrough — keeps the "module not installed" line out of
+    # the terminal but still in the JSON report.
     "not installed",
 )
 

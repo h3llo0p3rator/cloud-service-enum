@@ -11,6 +11,24 @@ from botocore.exceptions import BotoCoreError, ClientError
 from cloud_service_enum.core.auth import CloudAuthenticator, IdentitySummary
 from cloud_service_enum.core.errors import AuthenticationError
 
+# Canonical region list used when ``ec2:DescribeRegions`` is unavailable
+# (e.g. scoped instance roles that can still do IAM/STS/Org work). Covers
+# the regions where an attacker-relevant service is most likely to exist
+# without pulling in opt-in regions that would require explicit account
+# enablement.
+FALLBACK_REGIONS: tuple[str, ...] = (
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-central-1",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-northeast-1",
+)
+
 
 @dataclass
 class AwsAuthConfig:
@@ -124,18 +142,16 @@ class AwsAuthenticator(CloudAuthenticator):
         )
 
     async def list_regions(self) -> list[str]:
+        """Return every region enabled on the account.
+
+        Requires ``ec2:DescribeRegions``. Callers that want graceful
+        degradation (scoped roles often lack this permission) should wrap
+        this call and substitute :data:`FALLBACK_REGIONS` on failure.
+        """
         session = await self.session()
-        # EC2 DescribeRegions is a global control-plane call but still
-        # requires *some* region to sign the request; fall back to the
-        # SDK-wide default when neither the profile nor the config sets one.
         region = self.config.region or session.region_name or "us-east-1"
-        try:
-            async with session.client("ec2", region_name=region) as ec2:
-                resp = await ec2.describe_regions(AllRegions=False)
-        except (ClientError, BotoCoreError) as exc:
-            raise AuthenticationError(
-                f"Could not list AWS regions via EC2 in {region}: {exc}"
-            ) from exc
+        async with session.client("ec2", region_name=region) as ec2:
+            resp = await ec2.describe_regions(AllRegions=False)
         return sorted(r["RegionName"] for r in resp["Regions"])
 
     @property

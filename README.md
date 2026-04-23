@@ -281,6 +281,50 @@ cse aws enumerate \
   --report-format json --report-format xlsx
 ```
 
+A handful of ergonomic details worth knowing:
+
+- **Scoped credentials (EC2 instance roles, scoped workload identities) that
+  lack `ec2:DescribeRegions` won't abort the run.** `cse` tries
+  `DescribeRegions` once for region discovery, and on failure prints a
+  warning and falls back to a canonical set of commercial regions
+  (`us-east-1/2`, `us-west-1/2`, `eu-west-1/2`, `eu-central-1`,
+  `ap-southeast-1/2`, `ap-northeast-1`). Pass `--regions` to override.
+- **Caller identity + assumable roles surface inside the IAM scan.** Every
+  IAM walk now also resolves the current principal via
+  `sts:GetCallerIdentity`, dumps every inline + attached policy on that
+  principal, and extracts a dedicated `assumable_role` row for each
+  `sts:AssumeRole*` statement — useful when you want to know what a scoped
+  role is allowed to pivot into without chasing the policies manually.
+
+#### Active assume-role probing (`cse aws probe-assume`)
+
+Policy introspection tells you what the policies *say* is assumable.
+`probe-assume` tells you what actually *works* right now — including
+cross-account trust-policy effects the caller has no read access to.
+It hits `sts:AssumeRole` against every candidate you give it, classifies
+each response (`success` / `access_denied` / `trust_denied` /
+`no_such_role` / `malformed` / `throttled` / `error`), and throws away
+the returned short-lived credentials. Nothing else is done with them.
+
+```bash
+# Probe three specific role ARNs with the current credentials
+cse aws probe-assume \
+  --target arn:aws:iam::111111111111:role/prod-deploy \
+  --target arn:aws:iam::222222222222:role/prod-audit \
+  --target arn:aws:iam::333333333333:role/tenant-ops
+
+# Bulk mode: one ARN per line, `#` comments allowed
+cse aws probe-assume --target-file ./target-roles.txt
+
+# Apply an external ID to every probed AssumeRole call
+cse aws probe-assume \
+  --target-file ./target-roles.txt \
+  --target-external-id vendor-abc
+```
+
+Both `--target` and `--target-file` are additive — use them together to
+mix ad-hoc ARNs with a standing wordlist.
+
 #### Unauthenticated recon
 
 A lot of AWS services leak attacker-useful identifiers through the
