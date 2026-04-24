@@ -19,7 +19,13 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from cloud_service_enum.core.models import EnumerationRun, Provider, Scope, ServiceResult
+from cloud_service_enum.core.models import (
+    EnumerationRun,
+    MultiAccountRun,
+    Provider,
+    Scope,
+    ServiceResult,
+)
 from cloud_service_enum.core.output import Console
 
 _PREFERRED_COLUMNS: tuple[str, ...] = (
@@ -192,6 +198,53 @@ def render_service(console: Console, result: ServiceResult) -> None:
             f"  [muted]({suppressed} permission-denied error{'s' if suppressed != 1 else ''} "
             f"hidden — see report)[/muted]"
         )
+
+
+def render_multi_account(console: Console, multi: MultiAccountRun) -> None:
+    """Render a multi-profile fan-out: a roll-up table after each run.
+
+    Per-account output (identity panel, service panels, per-run summary
+    panel) is printed inline by :func:`run_provider` as each run
+    completes; this helper only emits the final combined roll-up so the
+    user gets a single table that summarises every account at a glance.
+    """
+    table = Table(box=SIMPLE_HEAVY, show_lines=False, expand=False, pad_edge=False)
+    table.add_column("profile", style="bold")
+    table.add_column("account / tenant")
+    table.add_column("resources", justify="right")
+    table.add_column("errors", justify="right")
+    table.add_column("duration_s", justify="right")
+
+    for run in multi.accounts:
+        ident = run.identity or {}
+        acct = str(
+            ident.get("tenant_or_account")
+            or ident.get("account_id")
+            or ident.get("principal")
+            or ""
+        )
+        profile = run.profile or "(default)"
+        res_count = run.resource_total()
+        err_count = run.error_total()
+        err_cell = f"[error]{err_count}[/error]" if err_count else "[muted]0[/muted]"
+        res_cell = str(res_count) if res_count else "[muted]0[/muted]"
+        table.add_row(profile, acct, res_cell, err_cell, f"{run.duration_s:.2f}")
+
+    totals = (
+        f"[success]{multi.resource_total()}[/success] resources  "
+        f"across [info]{len(multi.accounts)}[/info] account(s)  "
+        f"in [info]{multi.duration_s:.2f}s[/info]  "
+        f"({multi.error_total()} non-fatal errors)"
+    )
+    console.print()
+    console.print(
+        Panel(
+            table,
+            title=f"multi-account summary: {multi.provider.value}",
+            border_style="success",
+        )
+    )
+    console.print(totals)
 
 
 def render_summary(console: Console, run: EnumerationRun) -> None:

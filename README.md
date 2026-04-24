@@ -323,16 +323,40 @@ cse aws probe-assume \
 ```
 
 Both `--target` and `--target-file` are additive — use them together to
-mix ad-hoc ARNs with a standing wordlist.
+mix ad-hoc ARNs with a standing wordlist. You can also feed candidate
+ARNs straight from a prior IAM scan with `--from-iam-scan <path|dir>`,
+which extracts every role referenced in `cse aws enumerate --service
+iam --output-format json` output (including cross-account ARNs buried
+in policy documents and S3 object bodies). When run against the
+account root user the command prints a dedicated warning panel — STS
+blocks assume-role from the root principal regardless of trust policy.
+
+#### Multi-profile fan-out
+
+`cse aws enumerate` accepts `--profile` multiple times and a
+`--profile-file <path>` (one profile per line, `#` comments allowed).
+Each profile produces its own `EnumerationRun`; the results are
+aggregated into a single `MultiAccountRun` with a combined roll-up
+table and an additional merged JSON report in `--output-dir`.
+`--profile-concurrency <n>` controls how many profiles run in
+parallel (default 1, i.e. sequential).
+
+#### Global `--no-progress` / `--no-colour`
+
+Both flags live on the top-level `cse` group and are threaded into
+every sub-command via Click's context. They also honour the standard
+`NO_COLOR` and `CSE_NO_PROGRESS` / `CSE_NO_COLOUR` environment
+variables — useful for CI pipelines and log-capturing wrappers.
 
 #### Unauthenticated recon
 
 A lot of AWS services leak attacker-useful identifiers through the
 client-side bundles of their consuming web apps. The `aws unauth`
 sub-tree wraps recon flows for those leaks — no AWS credentials
-required. Three commands are wired up today: `cognito`, `s3`, and
-`api-gateway`. They share the same crawler and credential regex sweep,
-so you can point them at the same `--url` and the results will line up.
+required. Six commands are wired up today: `cognito`, `s3`,
+`api-gateway`, `beanstalk`, `cloudfront`, and `lambda-url`. They
+share the same crawler and credential regex sweep, so you can point
+them at the same `--url` and the results will line up.
 
 ```bash
 # Crawl a web app, pull userPoolIds / identityPoolIds / appClientIds
@@ -353,6 +377,15 @@ cse aws unauth s3 --bruteforce \
 
 # Fingerprint every API Gateway / Lambda Function URL the web app references.
 cse aws unauth api-gateway --url https://app.example.com
+
+# Extract Elastic Beanstalk CNAMEs + optional DNS resolution.
+cse aws unauth beanstalk --url https://app.example.com
+
+# Probe a CloudFront distribution for Host/Origin override behaviour.
+cse aws unauth cloudfront --url https://d123abcd.cloudfront.net/
+
+# Extract + probe *.lambda-url.<region>.on.aws URLs, classify auth mode.
+cse aws unauth lambda-url --url https://app.example.com
 ```
 
 The same `unauth` shape is also wired up for Azure and GCP:
@@ -367,6 +400,10 @@ cse azure unauth storage --url https://app.example.com
 cse azure unauth storage --bruteforce \
   --bruteforce-prefix acme --bruteforce-prefix acmeprod
 
+# Azure: discover *.azurewebsites.net hosts + probe canonical leak
+# paths (Kudu anonymous access, /.git/HEAD, /.env, …).
+cse azure unauth appservice --url https://portal.example.com
+
 # GCP: crawl for *.storage.googleapis.com buckets, probe metadata /
 # listing / IAM (metadata leaks projectNumber), secret-scan public
 # objects.
@@ -375,6 +412,9 @@ cse gcp unauth bucket --url https://app.example.com
 # GCP: wordlist bruteforce for bucket names.
 cse gcp unauth bucket --bruteforce \
   --bruteforce-prefix acme --bruteforce-prefix acme-prod
+
+# GCP: extract *.run.app URLs + classify auth posture.
+cse gcp unauth cloudrun --url https://app.example.com
 ```
 
 Full reference: [`docs/unauth-scans.md`](docs/unauth-scans.md).

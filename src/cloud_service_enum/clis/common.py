@@ -10,7 +10,7 @@ from typing import Any, TypeVar
 import click
 
 from cloud_service_enum.core.errors import CloudServiceError
-from cloud_service_enum.core.models import EnumerationRun
+from cloud_service_enum.core.models import EnumerationRun, MultiAccountRun
 from cloud_service_enum.core.output import get_console
 from cloud_service_enum.reporting import ReportFormat, write_reports
 
@@ -157,8 +157,17 @@ def report_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-def emit_reports(run: EnumerationRun, output_dir: Path, formats: tuple[str, ...]) -> None:
-    """Write ``run`` to every format the user requested and print the paths."""
+def emit_reports(
+    run: EnumerationRun | MultiAccountRun,
+    output_dir: Path,
+    formats: tuple[str, ...],
+) -> None:
+    """Write ``run`` to every format the user requested and print the paths.
+
+    Accepts both single-run and multi-account runs — the underlying
+    writer already knows how to fan out the latter into per-account
+    reports plus a combined JSON document.
+    """
     console = get_console()
     parsed = [ReportFormat(f.lower()) for f in formats]
     paths = write_reports(run, output_dir, parsed)
@@ -168,3 +177,33 @@ def emit_reports(run: EnumerationRun, output_dir: Path, formats: tuple[str, ...]
     console.rule("[muted]reports[/muted]", style="muted")
     for p in paths:
         console.print(f"  [muted]wrote[/muted] {p}")
+
+
+def collect_profiles(
+    profiles: tuple[str, ...],
+    profile_file: Path | None,
+) -> tuple[str, ...]:
+    """Flatten ``--profile`` + ``--profile-file`` into an ordered tuple.
+
+    Empty strings / ``#`` comments / duplicates are dropped, preserving
+    the order the user supplied them.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        entry = raw.strip()
+        if not entry or entry.startswith("#") or entry in seen:
+            return
+        ordered.append(entry)
+        seen.add(entry)
+
+    for raw in profiles:
+        for piece in raw.split(","):
+            _add(piece)
+    if profile_file is not None:
+        for line in profile_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            _add(line)
+    return tuple(ordered)

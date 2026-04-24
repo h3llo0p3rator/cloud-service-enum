@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from cloud_service_enum.clis.common import (
+    collect_profiles,
     deep_scan_options,
     emit_reports,
     report_options,
@@ -14,7 +15,8 @@ from cloud_service_enum.clis.common import (
     run_async,
     unauth_crawler_options,
 )
-from cloud_service_enum.core.models import Provider, Scope
+from cloud_service_enum.core.display import render_multi_account
+from cloud_service_enum.core.models import EnumerationRun, MultiAccountRun, Provider, Scope
 from cloud_service_enum.core.output import get_console
 from cloud_service_enum.core.registry import registry
 from cloud_service_enum.core.runner import run_provider
@@ -26,7 +28,34 @@ def aws() -> None:  # noqa: D401
 
 
 def _auth_options(fn):  # type: ignore[no-untyped-def]
-    fn = click.option("--profile", help="AWS profile name.")(fn)
+    fn = click.option(
+        "--profile",
+        "profiles",
+        multiple=True,
+        help=(
+            "AWS profile name. Repeatable — one enumeration run is "
+            "produced per profile and the results are aggregated into a "
+            "single MultiAccountRun."
+        ),
+    )(fn)
+    fn = click.option(
+        "--profile-file",
+        "profile_file",
+        type=click.Path(dir_okay=False, exists=True, path_type=Path),
+        default=None,
+        help="Path to a file listing one profile per line (# comments allowed).",
+    )(fn)
+    fn = click.option(
+        "--profile-concurrency",
+        "profile_concurrency",
+        type=int,
+        default=1,
+        show_default=True,
+        help=(
+            "How many profiles run in parallel. Default 1 (sequential) to "
+            "avoid rate-limit chaos; increase for wide, read-only sweeps."
+        ),
+    )(fn)
     fn = click.option("--region", help="Initial region for session/STS.")(fn)
     fn = click.option("--access-key", help="Static access key id.")(fn)
     fn = click.option("--secret-key", help="Static secret access key.")(fn)
@@ -92,7 +121,9 @@ def _auth_options(fn):  # type: ignore[no-untyped-def]
 @deep_scan_options
 @report_options
 def aws_enumerate(
-    profile: str | None,
+    profiles: tuple[str, ...],
+    profile_file: Path | None,
+    profile_concurrency: int,
     region: str | None,
     access_key: str | None,
     secret_key: str | None,
@@ -118,24 +149,10 @@ def aws_enumerate(
     report_formats: tuple[str, ...],
 ) -> None:
     from cloud_service_enum import aws as aws_pkg  # noqa: F401 - register services
-    from cloud_service_enum.aws.auth import AwsAuthConfig, AwsAuthenticator
 
-    cfg = AwsAuthConfig(
-        profile=profile,
-        region=region,
-        access_key=access_key,
-        secret_key=secret_key,
-        session_token=session_token,
-        role_arn=role_arn,
-        external_id=external_id,
-        mfa_serial=mfa_serial,
-        mfa_token=mfa_token,
-        web_identity_token_file=web_identity_token_file,
-    )
-    auth = AwsAuthenticator(cfg)
+    profile_list = collect_profiles(profiles, profile_file)
 
-    async def _go():  # type: ignore[no-untyped-def]
-        region_list = await _resolve_regions(auth, region, _split(regions))
+    def _build_scope(region_list: list[str]) -> Scope:
         explicit_services = _split(services)
         effective_deep, effective_secret = resolve_deep_flags(
             services=explicit_services,
@@ -158,7 +175,7 @@ def aws_enumerate(
             )
         else:
             effective_lambda_code = lambda_code
-        scope = Scope(
+        return Scope(
             provider=Provider.AWS,
             regions=region_list,
             services=explicit_services,
@@ -172,10 +189,82 @@ def aws_enumerate(
             s3_scan_size_limit_kb=s3_scan_size_limit_kb,
             lambda_code=effective_lambda_code,
         )
-        return await run_provider(Provider.AWS, auth, scope, show_progress=not no_progress)
 
-    run = run_async(_go())
-    emit_reports(run, output_dir, report_formats)
+    async def _run_single(profile: str | None) -> EnumerationRun:
+        from cloud_service_enum.aws.auth import AwsAuthConfig, AwsAuthenticator
+
+        cfg = AwsAuthConfig(
+            profile=profile,
+            region=region,
+            access_key=access_key,
+            secret_key=secret_key,
+            session_token=session_token,
+            role_arn=role_arn,
+            external_id=external_id,
+            mfa_serial=mfa_serial,
+            mfa_token=mfa_token,
+            web_identity_token_file=web_identity_token_file,
+        )
+        auth = AwsAuthenticator(cfg)
+        region_list = await _resolve_regions(auth, region, _split(regions))
+        scope = _build_scope(region_list)
+        run = await run_provider(
+            Provider.AWS, auth, scope, show_progress=not no_progress
+        )
+        run.profile = profile
+        return run
+
+    async def _go():  # type: ignore[no-untyped-def]
+        if len(profile_list) <= 1:
+            return await _run_single(profile_list[0] if profile_list else None)
+        return await _fanout_profiles(profile_list, profile_concurrency, _run_single)
+
+    result = run_async(_go())
+    if isinstance(result, MultiAccountRun):
+        render_multi_account(get_console(), result)
+    emit_reports(result, output_dir, report_formats)
+
+
+async def _fanout_profiles(
+    profiles: tuple[str, ...],
+    concurrency: int,
+    runner,  # type: ignore[no-untyped-def]
+) -> MultiAccountRun:
+    """Run ``runner`` once per profile, bounded by ``concurrency``.
+
+    Each run is printed inline (identity panel → service output →
+    per-run summary) as it finishes so the user still sees progress for
+    long sweeps; the roll-up table is printed by the caller after
+    everything has settled.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    started = datetime.now(timezone.utc)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    console = get_console()
+
+    async def _one(profile: str) -> EnumerationRun | None:
+        async with sem:
+            console.rule(f"[info]profile: {profile}[/info]", style="muted")
+            try:
+                return await runner(profile)
+            except Exception as exc:  # noqa: BLE001
+                console.print(
+                    f"[error]profile {profile} failed:[/error] {exc}"
+                )
+                return None
+
+    results = await asyncio.gather(*[_one(p) for p in profiles])
+    finished = datetime.now(timezone.utc)
+    accounts = [run for run in results if run is not None]
+    return MultiAccountRun(
+        provider=Provider.AWS,
+        accounts=accounts,
+        started_at=started,
+        finished_at=finished,
+        duration_s=round((finished - started).total_seconds(), 3),
+    )
 
 
 @aws.command("services", help="List the AWS services the tool can enumerate.")
@@ -208,6 +297,17 @@ def aws_services() -> None:
     help="File containing one candidate role ARN per line (# comments allowed).",
 )
 @click.option(
+    "--from-iam-scan",
+    "from_iam_scan",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help=(
+        "Pull candidate role ARNs from a prior `cse aws enumerate` JSON "
+        "report (path or directory — picks the newest aws-*.json). "
+        "Additive with --target / --target-file; de-duped by ARN."
+    ),
+)
+@click.option(
     "--target-external-id",
     "probe_external_id",
     default=None,
@@ -230,7 +330,9 @@ def aws_services() -> None:
 @click.option("--timeout", "timeout_s", type=float, default=30.0, show_default=True)
 @report_options
 def aws_probe_assume(
-    profile: str | None,
+    profiles: tuple[str, ...],
+    profile_file: Path | None,
+    profile_concurrency: int,
     region: str | None,
     access_key: str | None,
     secret_key: str | None,
@@ -242,6 +344,7 @@ def aws_probe_assume(
     web_identity_token_file: str | None,
     probe_role_arns: tuple[str, ...],
     probe_role_arn_file: Path | None,
+    from_iam_scan: Path | None,
     probe_external_id: str | None,
     session_name: str,
     duration_seconds: int,
@@ -252,18 +355,55 @@ def aws_probe_assume(
 ) -> None:
     from cloud_service_enum.aws.probe_assume import (
         ProbeAssumeScope,
+        arns_from_iam_scan,
         load_role_arns,
         run_probe_assume,
     )
 
-    arns = load_role_arns(probe_role_arns, path=probe_role_arn_file)
-    if not arns:
+    console = get_console()
+
+    profile_list = collect_profiles(profiles, profile_file)
+    if len(profile_list) > 1:
         raise click.UsageError(
-            "Provide at least one candidate via --target or --target-file."
+            "probe-assume currently supports a single --profile. Use "
+            "`cse aws enumerate` for multi-profile fan-out."
+        )
+    profile = profile_list[0] if profile_list else None
+    _ = profile_concurrency  # accepted for option parity
+
+    direct = load_role_arns(probe_role_arns, path=probe_role_arn_file)
+    discovered: dict[str, str] = {}
+    if from_iam_scan is not None:
+        try:
+            discovered = arns_from_iam_scan(from_iam_scan)
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.UsageError(f"--from-iam-scan: {exc}") from exc
+        console.print(
+            f"[info]discovered {len(discovered)} candidate ARN(s) from "
+            f"{from_iam_scan}[/info]"
+        )
+
+    ordered: list[str] = []
+    provenance: dict[str, str] = {}
+    seen: set[str] = set()
+    for arn in direct:
+        if arn not in seen:
+            ordered.append(arn)
+            seen.add(arn)
+    for arn, via in discovered.items():
+        if arn not in seen:
+            ordered.append(arn)
+            seen.add(arn)
+            provenance[arn] = via
+
+    if not ordered:
+        raise click.UsageError(
+            "Provide at least one candidate via --target, --target-file, or "
+            "--from-iam-scan."
         )
 
     scope = ProbeAssumeScope(
-        role_arns=tuple(arns),
+        role_arns=tuple(ordered),
         external_id=probe_external_id,
         session_name=session_name,
         duration_seconds=duration_seconds,
@@ -276,6 +416,7 @@ def aws_probe_assume(
         session_token=session_token,
         role_arn=role_arn,
         web_identity_token_file=web_identity_token_file,
+        discovered_from=provenance,
     )
     _ = (external_id, mfa_serial, mfa_token)  # absorbed via shared option set
     run = run_async(run_probe_assume(scope))
@@ -452,6 +593,149 @@ def aws_unauth_api_gateway(
         extra_hosts=tuple(extra_hosts),
     )
     run = run_async(run_api_gateway_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
+@aws_unauth.command(
+    "beanstalk",
+    help="Extract Elastic Beanstalk CNAMEs from a crawl + optional DNS resolution.",
+)
+@click.option("--url", "target_url", default=None, help="Entry URL for the crawl.")
+@click.option(
+    "--hostname",
+    "hostnames",
+    multiple=True,
+    help="Probe this Beanstalk hostname directly (repeatable).",
+)
+@unauth_crawler_options
+@report_options
+def aws_unauth_beanstalk(
+    target_url: str | None,
+    hostnames: tuple[str, ...],
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not hostnames:
+        raise click.UsageError("Provide at least one of --url or --hostname.")
+
+    from cloud_service_enum.aws.unauth import (
+        BeanstalkUnauthScope,
+        run_beanstalk_unauth,
+    )
+
+    scope = BeanstalkUnauthScope(
+        target_url=target_url,
+        hostnames=tuple(hostnames),
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_beanstalk_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
+@aws_unauth.command(
+    "cloudfront",
+    help="Probe a target URL for CloudFront Host / Origin override behaviour.",
+)
+@click.option("--url", "target_url", required=True, help="URL to probe (CloudFront distribution).")
+@click.option(
+    "--host-override",
+    "host_override",
+    default=None,
+    help="Send a second request with this Host header (defaults to `evil.example`).",
+)
+@click.option(
+    "--origin-override",
+    "origin_override",
+    default="https://evil.example",
+    show_default=True,
+    help="Origin header to use for the CORS-style probe.",
+)
+@click.option("--max-concurrency", type=int, default=5, show_default=True)
+@click.option("--timeout", "timeout_s", type=float, default=20.0, show_default=True)
+@click.option(
+    "--user-agent",
+    default="cloud-service-enum/2.0 (+unauth cloudfront)",
+    show_default=True,
+)
+@report_options
+def aws_unauth_cloudfront(
+    target_url: str,
+    host_override: str | None,
+    origin_override: str,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    from cloud_service_enum.aws.unauth import (
+        CloudFrontUnauthScope,
+        run_cloudfront_unauth,
+    )
+
+    scope = CloudFrontUnauthScope(
+        target_url=target_url,
+        host_override=host_override,
+        origin_override=origin_override,
+        timeout_s=timeout_s,
+        max_concurrency=max_concurrency,
+        user_agent=user_agent,
+    )
+    run = run_async(run_cloudfront_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
+
+
+@aws_unauth.command(
+    "lambda-url",
+    help="Extract + probe Lambda Function URLs, classifying auth mode.",
+)
+@click.option("--url", "target_url", default=None, help="Entry URL for the crawl.")
+@click.option(
+    "--lambda-url",
+    "lambda_urls",
+    multiple=True,
+    help="Probe this Lambda Function URL directly (repeatable).",
+)
+@unauth_crawler_options
+@report_options
+def aws_unauth_lambda_url(
+    target_url: str | None,
+    lambda_urls: tuple[str, ...],
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not lambda_urls:
+        raise click.UsageError("Provide at least one of --url or --lambda-url.")
+
+    from cloud_service_enum.aws.unauth import (
+        LambdaUrlUnauthScope,
+        run_lambda_url_unauth,
+    )
+
+    scope = LambdaUrlUnauthScope(
+        target_url=target_url,
+        urls=tuple(lambda_urls),
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_lambda_url_unauth(scope))
     emit_reports(run, output_dir, report_formats)
 
 

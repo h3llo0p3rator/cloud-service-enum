@@ -35,6 +35,29 @@ _THEME = Theme(
 )
 
 _console: Console | None = None
+_force_no_color: bool = False
+_force_no_progress: bool = False
+
+
+def configure_console(
+    *, no_color: bool = False, no_progress: bool = False
+) -> Console:
+    """Configure the singleton console at startup.
+
+    The top-level ``cse`` group calls this once, before any subcommand
+    runs, so every downstream ``get_console()`` caller sees the same
+    settings. Safe to call multiple times — later invocations override
+    earlier ones.
+    """
+    global _console, _force_no_color, _force_no_progress
+    _force_no_color = no_color
+    _force_no_progress = no_progress
+    _console = Console(
+        theme=_THEME,
+        highlight=False,
+        no_color=no_color,
+    )
+    return _console
 
 
 def get_console() -> Console:
@@ -42,6 +65,11 @@ def get_console() -> Console:
     if _console is None:
         _console = Console(theme=_THEME, highlight=False)
     return _console
+
+
+def progress_disabled() -> bool:
+    """Return whether progress bars are globally suppressed."""
+    return _force_no_progress
 
 
 @contextmanager

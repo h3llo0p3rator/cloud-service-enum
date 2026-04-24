@@ -6,7 +6,7 @@ predictable public endpoints that don't require credentials to reach.
 The `cse <provider> unauth` sub-trees wrap those recon flows behind a
 single CLI: no cloud credentials are required on the scanner side.
 
-Five commands are currently wired up across three providers:
+Ten commands are currently wired up across three providers:
 
 - [`aws unauth cognito`](#cse-aws-unauth-cognito) — user / identity pool
   + client id hunt.
@@ -14,13 +14,25 @@ Five commands are currently wired up across three providers:
   probes, optional wordlist bruteforce + object sampling.
 - [`aws unauth api-gateway`](#cse-aws-unauth-api-gateway) — REST / HTTP
   / WebSocket API Gateway + Lambda Function URL fingerprinting.
+- [`aws unauth beanstalk`](#cse-aws-unauth-beanstalk) — Elastic
+  Beanstalk CNAME hunt + optional DNS resolution.
+- [`aws unauth cloudfront`](#cse-aws-unauth-cloudfront) — Host / Origin
+  override cache-key-confusion probe against a single URL.
+- [`aws unauth lambda-url`](#cse-aws-unauth-lambda-url) — extract +
+  probe `lambda-url.on.aws` endpoints, classifying auth mode.
 - [`azure unauth storage`](#cse-azure-unauth-storage) — storage-account
   hunt across all five endpoints (blob / file / queue / table / dfs)
   plus built-in blob-container probes and blob sampling.
+- [`azure unauth appservice`](#cse-azure-unauth-appservice) — Azure
+  App Service (`*.azurewebsites.net`) discovery + canonical leak
+  probes (Kudu anonymous access, `/.git/HEAD`, `/.env`, …).
 - [`gcp unauth bucket`](#cse-gcp-unauth-bucket) — GCS bucket hunt with
   metadata / listing / IAM probes. The metadata response leaks the
   owning `projectNumber`, which is the closest thing GCP has to S3
   account-id attribution.
+- [`gcp unauth cloudrun`](#cse-gcp-unauth-cloudrun) — extract
+  `*.run.app` URLs + classify their auth posture (public vs
+  IAM-gated).
 
 Every command shares the same crawler + credential regex sweep:
 extraction regexes and probes differ per service, but the
@@ -486,3 +498,240 @@ kinds:
   It never attempts to evaluate whether a given role grants anything
   useful to the scanning principal — that's the authenticated scan's
   job.
+
+## `cse aws unauth beanstalk`
+
+Extracts Elastic Beanstalk environment hostnames from a crawled app and
+optionally resolves them to confirm the EB environment is still live.
+
+```bash
+cse aws unauth beanstalk --url https://app.example.com
+cse aws unauth beanstalk --hostname myapp.us-east-1.elasticbeanstalk.com
+```
+
+### What it does
+
+1. **Crawl** (`--url`) — same-origin crawl that regex-matches
+   `<env>[.<region>].elasticbeanstalk.com` in every text body.
+2. **Direct inputs** — `--hostname` accepts explicit Beanstalk hosts
+   (repeatable); useful when you already know the environment name.
+3. **DNS resolution** — each hit is resolved via asyncio's DNS
+   resolver. The resolver captures the CNAME target (usually
+   `awseb-<env>.<region>.elb.amazonaws.com`) and raw A records, and
+   flags whether the target still looks like an EB-controlled load
+   balancer.
+
+Failed lookups (no DNS records at all) are suppressed from the
+terminal to avoid drowning the output with dead environments.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL for the crawl. |
+| `--hostname` | (none) | Explicit Beanstalk hostname (repeatable). |
+| Crawler knobs | same as other unauth commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url` or `--hostname` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-beanstalk")` with these resource
+kinds:
+
+- `eb-env` — `hostname`, `name` (environment name guess), `region`,
+  `cname_target`, `is_eb_controlled` (yes/no/-), `resolved_ips`.
+- `crawl_summary` — when `--url` was supplied.
+
+## `cse aws unauth cloudfront`
+
+Fires a triplet of probes at a single URL to surface CloudFront cache
+key confusion and CORS misconfiguration: a baseline request, one with
+a custom `Host` header, and one with a forged `Origin` header. Each
+response is diffed against the baseline.
+
+```bash
+cse aws unauth cloudfront --url https://d123abcd.cloudfront.net/
+cse aws unauth cloudfront --url https://assets.example.com \
+    --host-override admin.example.com
+```
+
+### What it does
+
+1. **Baseline** — `GET /` with the scanner's default User-Agent.
+2. **Host override** — `GET /` with `Host: <alt>` (defaults to a
+   throwaway `evil.example`). A divergent body size or cache header
+   is flagged as a potential cache-key confusion issue.
+3. **Origin override** — `GET /` with `Origin: https://evil.example`.
+   Flags `Access-Control-Allow-Origin: *` and echoed-origin +
+   `Access-Control-Allow-Credentials: true` combos.
+
+All three responses capture the `x-amz-cf-id`, `x-amz-cf-pop`,
+`via`, and any cache headers for forensic clarity. The runner
+never mutates state: probes are plain `GET`s.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (required) | URL to probe. |
+| `--host-override` | `evil.example` | Alternate Host header. |
+| `--origin-override` | `https://evil.example` | Origin header for CORS probe. |
+| `--max-concurrency` | 5 | Currently unused (probes are sequential). |
+| `--timeout` | 20 | Per-request HTTP timeout. |
+| `--user-agent` | `cloud-service-enum/2.0 (+unauth cloudfront)` | User-Agent header. |
+
+### Output shape
+
+One `ServiceResult(service="unauth-cloudfront")` with a
+`cf-response` resource per probe (`baseline`, `host-override`,
+`origin-override`), each carrying `status`, `body_size`,
+`cache_header`, `x_amz_cf_id`, `x_amz_cf_pop`, `via_header`,
+`allow_origin`, and `diff_vs_baseline`.
+
+## `cse aws unauth lambda-url`
+
+Extracts `*.lambda-url.<region>.on.aws` URLs from a crawled app (or
+takes explicit `--lambda-url` inputs) and probes each with a HEAD +
+GET pair to classify the function's auth mode.
+
+```bash
+cse aws unauth lambda-url --url https://app.example.com
+cse aws unauth lambda-url \
+    --lambda-url https://abcd.lambda-url.us-east-1.on.aws
+```
+
+### What it does
+
+1. **Crawl + extract** — every text body is regex-matched for Lambda
+   Function URLs.
+2. **Direct inputs** — `--lambda-url` (repeatable).
+3. **Probe** — HEAD + small GET. Auth mode is classified as `NONE`
+   when the function returns a 2xx body, or `AWS_IAM` when the
+   response is 401/403 with the canonical
+   `Missing Authentication Token` body.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL for the crawl. |
+| `--lambda-url` | (none) | Explicit Lambda Function URL (repeatable). |
+| Crawler knobs | same as other unauth commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url` or `--lambda-url` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-lambda-url")` with
+`lambda-url` resources carrying `url`, `function_hint`, `region`,
+`auth_mode` (`NONE` / `AWS_IAM`), `head_status`, `get_status`,
+`request_id`, `cors_wildcard`, `cors_credentials`, plus optional
+`crawl_summary`.
+
+## `cse azure unauth appservice`
+
+Extracts `*.azurewebsites.net` and `*.scm.azurewebsites.net`
+hostnames from a crawled app and probes each for the canonical
+App Service health path plus a small set of known config-leak
+paths.
+
+```bash
+cse azure unauth appservice --url https://portal.example.com
+cse azure unauth appservice --hostname demo-site.azurewebsites.net
+```
+
+### What it does
+
+1. **Crawl + extract** — every text body is regex-matched for
+   `*.azurewebsites.net` hosts; both primary sites and their `.scm.`
+   companions are captured.
+2. **Direct inputs** — `--hostname` accepts explicit App Service
+   hostnames (repeatable); passing the primary site auto-derives
+   its `.scm.` companion.
+3. **Probe** — for each host:
+   - `/robots933456.txt` — the canonical App Service health path. A
+     404 from the EasyAuth / Antares frontend is proof the site
+     exists even when the application denies requests.
+   - `/.git/HEAD`, `/.env`, `/package.json`, `/appsettings.json`,
+     `/web.config`, `/wwwroot/.env` — known config-leak paths.
+   - `/api/siteextensions` on the `.scm.` companion — 200 here
+     indicates Kudu is anonymously reachable, which is high
+     severity.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL for the crawl. |
+| `--hostname` | (none) | Explicit App Service hostname (repeatable). |
+| Crawler knobs | same as other unauth commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url` or `--hostname` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-appservice")` with these
+resource kinds:
+
+- `azure-webapp` — `hostname`, `scm_hostname`, `site_name`, `exists`,
+  `kudu_anonymous` (yes/no/-), plus a `probes` table with one row per
+  probed path (`path`, `status`, `length`, `leak_indicator`).
+- `crawl_summary` — when `--url` was supplied.
+
+## `cse gcp unauth cloudrun`
+
+Extracts `*.run.app` URLs from a crawled app and classifies each
+as public vs IAM-gated. Cloud Run exposes a canonical
+`x-cloud-trace-context` response header; the presence of that
+header plus the HTTP status code drives the classification.
+
+```bash
+cse gcp unauth cloudrun --url https://app.example.com
+cse gcp unauth cloudrun \
+    --run-url https://svc-abc123-uc.a.run.app
+```
+
+### What it does
+
+1. **Crawl + extract** — every text body is regex-matched for
+   `*.a.run.app` (default Cloud Run URL shape) and `*.run.app`
+   (custom domain shape).
+2. **Direct inputs** — `--run-url` (repeatable).
+3. **Probe** — HEAD + GET against `/`. Classification:
+   - 2xx / 3xx + `x-cloud-trace-context` → `public`.
+   - 401 / 403 + `x-cloud-trace-context` → `iam-gated` (service
+     exists but the invoker lacks `run.services.invoke`).
+   - Other responses → `proxy (<status>)` — typically an upstream
+     load balancer or Firebase Hosting domain.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url` | (none) | Entry URL for the crawl. |
+| `--run-url` | (none) | Explicit Cloud Run URL (repeatable). |
+| Crawler knobs | same as other unauth commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
+
+At least one of `--url` or `--run-url` is required.
+
+### Output shape
+
+One `ServiceResult(service="unauth-cloudrun")` with these resource
+kinds:
+
+- `cloudrun_service` — `url`, `name`, `region_hint`, `auth_mode`
+  (`public` / `iam-gated` / `proxy (<status>)`), `is_cloud_run`,
+  `head_status`, `get_status`, `cloud_trace`, `fingerprint_headers`
+  (server / via / alt-svc when present), `first_seen_url`.
+- `crawl_summary` — when `--url` was supplied.
+
+### Safety notes
+
+All new unauth probes in this section honour the same read-only
+discipline as the older commands: no request body writes, no
+authenticated handshakes, and every probe is either a HEAD or a
+GET. The host override / origin override probes in
+`cse aws unauth cloudfront` deliberately send syntactically valid
+headers against the target URL — they never attempt to modify
+cached content.

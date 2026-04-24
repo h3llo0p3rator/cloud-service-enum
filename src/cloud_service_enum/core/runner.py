@@ -15,7 +15,7 @@ from cloud_service_enum.core.display import (
 )
 from cloud_service_enum.core.errors import AuthenticationError
 from cloud_service_enum.core.models import EnumerationRun, Provider, Scope, ServiceResult
-from cloud_service_enum.core.output import get_console, progress_bar
+from cloud_service_enum.core.output import get_console, progress_bar, progress_disabled
 from cloud_service_enum.core.registry import registry
 
 
@@ -71,8 +71,10 @@ async def run_provider(
 
     tasks: list[tuple[str, ServiceFactory]] = [(e.service_name, _wrap(e)) for e in enumerators]
 
+    effective_progress = show_progress and not progress_disabled()
+
     try:
-        if show_progress:
+        if effective_progress:
             with progress_bar() as bar:
                 task_id = bar.add_task(
                     f"[info]{provider.value}[/info] ({len(tasks)} services)",

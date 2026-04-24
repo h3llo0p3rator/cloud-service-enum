@@ -16,6 +16,7 @@ after recording the returned principal ARN and expiry.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
+from rich.panel import Panel
 
 from cloud_service_enum.aws.auth import AwsAuthConfig, AwsAuthenticator
 from cloud_service_enum.core.display import render_service, render_summary
@@ -33,6 +35,10 @@ from cloud_service_enum.core.output import Console, get_console
 # Arn shape: arn:aws:iam::<account>:role/<path>/<name>
 _ROLE_ARN_RE = re.compile(
     r"^arn:(?P<partition>aws|aws-cn|aws-us-gov):iam::(?P<account>\d{12}):role(?:/.+)?$"
+)
+# Same shape but anchored for greedy extraction from free-form text.
+_ROLE_ARN_SEARCH_RE = re.compile(
+    r"arn:(?:aws|aws-cn|aws-us-gov):iam::\d{12}:role/[\w+=,.@\-/]+"
 )
 
 _STATUS_STYLES: dict[str, str] = {
@@ -64,6 +70,10 @@ class ProbeAssumeScope:
     session_token: str | None = None
     role_arn: str | None = None  # pre-hop assume before probing
     web_identity_token_file: str | None = None
+    # Per-ARN provenance ("via iam:caller_identity" / "via s3://…") carried
+    # forward onto the attempt rows so reports say where each candidate
+    # came from. Populated by :func:`arns_from_iam_scan` and the CLI.
+    discovered_from: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -77,6 +87,8 @@ class AssumeAttempt:
     error_message: str = ""
     assumed_arn: str = ""
     session_expiration: str = ""
+    discovered_from: str = ""
+    note: str = ""
 
 
 def load_role_arns(sources: tuple[str, ...], *, path: Path | None) -> list[str]:
@@ -98,6 +110,138 @@ def load_role_arns(sources: tuple[str, ...], *, path: Path | None) -> list[str]:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             _add(line)
     return collected
+
+
+def arns_from_iam_scan(source: Path) -> dict[str, str]:
+    """Extract role ARN candidates from a ``cse aws enumerate`` JSON report.
+
+    Walks ``run["services"][]["resources"][]`` and yields every candidate
+    alongside a human-readable provenance string. Each candidate is
+    emitted once (first-seen provenance wins) so the caller can merge
+    the output with ``--target`` / ``--target-file`` ARNs without
+    duplicating attempts.
+
+    Sources we consider:
+
+    * ``kind == "role"`` — the canonical role arn.
+    * ``kind == "assumable_role"`` / ``"caller_policy"`` — surfaces left
+      by the IAM caller introspection.
+    * Free-form ARN strings matching the role pattern inside policy
+      statements, resource arns, and other text bodies (``definition``,
+      ``script``, ``startup_script``, ``user_data``, object excerpts,
+      secret findings, generic string fields).
+    """
+    source = Path(source)
+    if source.is_dir():
+        candidates = sorted(
+            source.glob("aws-*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            raise FileNotFoundError(f"no aws-*.json reports in {source}")
+        source = candidates[0]
+    try:
+        raw = source.read_text(encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001
+        raise FileNotFoundError(f"could not read {source}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source} is not valid JSON: {exc}") from exc
+
+    found: dict[str, str] = {}
+
+    def _record(arn: str, provenance: str) -> None:
+        if not arn or arn in found:
+            return
+        if not _ROLE_ARN_SEARCH_RE.fullmatch(arn):
+            return
+        found[arn] = provenance
+
+    services = payload.get("services") or []
+    for svc in services:
+        service_name = svc.get("service") or "?"
+        for row in svc.get("resources") or []:
+            _extract_row(row, service_name, _record)
+
+    return found
+
+
+def _extract_row(
+    row: dict[str, Any],
+    service_name: str,
+    record: Any,
+) -> None:
+    """Pull role ARNs out of a single resource row + its nested bodies."""
+    kind = str(row.get("kind") or "")
+    name = str(row.get("name") or row.get("id") or "")
+    source_label = f"{service_name}:{kind}:{name}" if name else f"{service_name}:{kind}"
+
+    if kind == "role":
+        arn = row.get("arn") or row.get("id")
+        if isinstance(arn, str):
+            record(arn, f"iam:role {name or arn}")
+    if kind in {"assumable_role", "caller_policy"}:
+        resource = row.get("resource") or row.get("arn") or row.get("id")
+        if isinstance(resource, str):
+            record(resource, f"iam:{kind} via {name or resource}")
+
+    # Walk policy documents and role-binding blocks for role ARNs in
+    # Resource / principal statements. Every Statement.Resource may be
+    # a string or a list of strings; both get coerced via the generic
+    # text scan below.
+    policy = row.get("policy_document") or row.get("assume_role_policy")
+    if isinstance(policy, (dict, list)):
+        for arn in _scan_json_for_role_arns(policy):
+            record(arn, f"{source_label} · policy_document")
+
+    for field_name in (
+        "inline_policies",
+        "attached_policies",
+        "role_bindings",
+    ):
+        value = row.get(field_name)
+        if isinstance(value, (dict, list)):
+            for arn in _scan_json_for_role_arns(value):
+                record(arn, f"{source_label} · {field_name}")
+
+    for field_name in (
+        "definition",
+        "script",
+        "startup_script",
+        "user_data",
+        "handler_excerpt",
+    ):
+        value = row.get(field_name)
+        if isinstance(value, str):
+            for arn in _ROLE_ARN_SEARCH_RE.findall(value):
+                record(arn, f"{source_label} · {field_name}")
+
+    # object / secret / free-form payloads — scan any nested string
+    # bodies the service emitted.
+    for arn in _scan_json_for_role_arns(row):
+        record(arn, source_label)
+
+
+def _scan_json_for_role_arns(value: Any) -> list[str]:
+    """Walk a JSON-ish value collecting every role-ARN-shaped string."""
+    out: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, str):
+            out.extend(_ROLE_ARN_SEARCH_RE.findall(node))
+            return
+        if isinstance(node, dict):
+            for sub in node.values():
+                _walk(sub)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for sub in node:
+                _walk(sub)
+
+    _walk(value)
+    return out
 
 
 async def run_probe_assume(scope: ProbeAssumeScope) -> EnumerationRun:
@@ -131,6 +275,8 @@ async def run_probe_assume(scope: ProbeAssumeScope) -> EnumerationRun:
         raise AuthenticationError(f"aws: {exc}") from exc
 
     identity = identity_summary.model_dump()
+    caller_arn = str(identity.get("principal") or identity.get("arn") or "")
+    is_root_caller = caller_arn.endswith(":root")
 
     from cloud_service_enum.core.display import render_config, render_identity
 
@@ -147,11 +293,21 @@ async def run_probe_assume(scope: ProbeAssumeScope) -> EnumerationRun:
         },
     )
 
+    if is_root_caller:
+        _render_root_warning_panel(console)
+
     svc_started = datetime.now(timezone.utc)
     try:
         attempts = await _run_attempts(auth, scope)
     finally:
         await auth.close()
+
+    if is_root_caller:
+        for a in attempts:
+            a.note = "root_caller"
+    for a in attempts:
+        if not a.discovered_from:
+            a.discovered_from = scope.discovered_from.get(a.role_arn, "")
 
     resources = [_attempt_to_row(a) for a in attempts]
     cis_fields = _summarise(attempts)
@@ -283,7 +439,32 @@ def _attempt_to_row(attempt: AssumeAttempt) -> dict[str, Any]:
         "session_expiration": attempt.session_expiration,
         "error_code": attempt.error_code,
         "error_message": attempt.error_message,
+        "discovered_from": attempt.discovered_from or "",
+        "note": attempt.note or "",
     }
+
+
+def _render_root_warning_panel(console: Console) -> None:
+    """Tell the user why every attempt is about to return ``access_denied``.
+
+    STS categorically refuses ``AssumeRole`` from the account-root user
+    regardless of the role's trust policy, so probing under root is a
+    no-op. We still run the probes so the verdict block visibly confirms
+    ``all access_denied``; every attempt is tagged ``note="root_caller"``
+    so the JSON report explains itself.
+    """
+    body = (
+        "The current identity is the [bold]account root user[/bold]. STS "
+        "prohibits [code]sts:AssumeRole[/code] from root regardless of "
+        "the role's trust policy.\n\n"
+        "Every probe below will return [warning]access_denied[/warning] —"
+        " this is a limitation of the caller, not of the target roles. "
+        "Re-run under an IAM user or role that has [code]sts:AssumeRole"
+        "[/code] for ground truth."
+    )
+    console.print(
+        Panel(body, title="root caller detected", border_style="warning")
+    )
 
 
 def _summarise(attempts: list[AssumeAttempt]) -> dict[str, Any]:

@@ -399,3 +399,48 @@ def azure_unauth_storage(
     )
     run = run_async(run_storage_unauth(scope))
     emit_reports(run, output_dir, report_formats)
+
+
+@azure_unauth.command(
+    "appservice",
+    help="Extract *.azurewebsites.net hostnames + probe canonical leak paths.",
+)
+@click.option("--url", "target_url", default=None, help="Entry URL for the crawl.")
+@click.option(
+    "--hostname",
+    "hostnames",
+    multiple=True,
+    help="Probe this App Service hostname directly (repeatable).",
+)
+@unauth_crawler_options
+@report_options
+def azure_unauth_appservice(
+    target_url: str | None,
+    hostnames: tuple[str, ...],
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not hostnames:
+        raise click.UsageError("Provide at least one of --url or --hostname.")
+
+    from cloud_service_enum.azure.unauth import (
+        AppServiceUnauthScope,
+        run_appservice_unauth,
+    )
+
+    scope = AppServiceUnauthScope(
+        target_url=target_url,
+        hostnames=tuple(hostnames),
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_appservice_unauth(scope))
+    emit_reports(run, output_dir, report_formats)

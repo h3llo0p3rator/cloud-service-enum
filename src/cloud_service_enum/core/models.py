@@ -120,6 +120,11 @@ class EnumerationRun(BaseModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     duration_s: float = 0.0
+    # Optional label carried on a run when it was produced as one slice
+    # of a :class:`MultiAccountRun`. Lets the render/report layers show
+    # which profile / account the run belongs to without shoving the
+    # provenance into ``identity``.
+    profile: str | None = None
 
     def by_service(self) -> dict[str, ServiceResult]:
         return {s.service: s for s in self.services}
@@ -129,3 +134,26 @@ class EnumerationRun(BaseModel):
 
     def error_total(self) -> int:
         return sum(len(s.errors) for s in self.services)
+
+
+class MultiAccountRun(BaseModel):
+    """A fan-out of :class:`EnumerationRun`s across several AWS profiles.
+
+    Only the multi-profile AWS path produces this shape right now; Azure
+    and GCP drive one run per subscription / project natively through
+    their per-service loops.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    provider: Provider
+    accounts: list[EnumerationRun] = Field(default_factory=list)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    finished_at: datetime | None = None
+    duration_s: float = 0.0
+
+    def resource_total(self) -> int:
+        return sum(run.resource_total() for run in self.accounts)
+
+    def error_total(self) -> int:
+        return sum(run.error_total() for run in self.accounts)

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree.ElementTree import Element, ElementTree, SubElement
 
-from cloud_service_enum.core.models import EnumerationRun, ServiceResult
+from cloud_service_enum.core.models import EnumerationRun, MultiAccountRun, ServiceResult
 
 
 class ReportFormat(StrEnum):
@@ -38,18 +38,43 @@ class ReportWriter:
     def write(self, fmt: ReportFormat) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         ts = self.run.started_at.strftime("%Y%m%d-%H%M%S")
-        stem = f"{self.run.provider.value}-{ts}"
+        suffix = f"-{self.run.profile}" if self.run.profile else ""
+        stem = f"{self.run.provider.value}{suffix}-{ts}"
         path = self.output_dir / f"{stem}.{fmt.value}"
         _WRITERS[fmt](self.run, path)
         return path
 
 
 def write_reports(
-    run: EnumerationRun, output_dir: str | Path, formats: list[ReportFormat]
+    run: EnumerationRun | MultiAccountRun,
+    output_dir: str | Path,
+    formats: list[ReportFormat],
 ) -> list[Path]:
-    """Write a run to every format in ``formats`` and return the paths."""
-    writer = ReportWriter(run=run, output_dir=Path(output_dir))
+    """Write a run to every format in ``formats`` and return the paths.
+
+    A :class:`MultiAccountRun` fans out into one report set per member
+    run plus, for JSON only, a single combined document so downstream
+    tools can consume the aggregate shape directly.
+    """
+    output = Path(output_dir)
+    if isinstance(run, MultiAccountRun):
+        paths: list[Path] = []
+        for member in run.accounts:
+            paths.extend(write_reports(member, output, formats))
+        if ReportFormat.JSON in formats:
+            paths.append(_multi_json(run, output))
+        return paths
+    writer = ReportWriter(run=run, output_dir=output)
     return [writer.write(fmt) for fmt in formats]
+
+
+def _multi_json(multi: MultiAccountRun, output_dir: Path) -> Path:
+    """Serialise a :class:`MultiAccountRun` to a single combined JSON doc."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ts = multi.started_at.strftime("%Y%m%d-%H%M%S")
+    path = output_dir / f"{multi.provider.value}-multi-{ts}.json"
+    path.write_text(multi.model_dump_json(indent=2, exclude_none=True), encoding="utf-8")
+    return path
 
 
 def _json(run: EnumerationRun, path: Path) -> None:

@@ -187,3 +187,48 @@ def gcp_unauth_bucket(
     )
     run = run_async(run_bucket_unauth(scope))
     emit_reports(run, output_dir, report_formats)
+
+
+@gcp_unauth.command(
+    "cloudrun",
+    help="Extract *.run.app URLs + classify their auth posture (public vs IAM-gated).",
+)
+@click.option("--url", "target_url", default=None, help="Entry URL for the crawl.")
+@click.option(
+    "--run-url",
+    "run_urls",
+    multiple=True,
+    help="Probe this Cloud Run URL directly (repeatable).",
+)
+@unauth_crawler_options
+@report_options
+def gcp_unauth_cloudrun(
+    target_url: str | None,
+    run_urls: tuple[str, ...],
+    max_pages: int,
+    max_concurrency: int,
+    timeout_s: float,
+    user_agent: str,
+    extra_hosts: tuple[str, ...],
+    output_dir,  # type: ignore[no-untyped-def]
+    report_formats: tuple[str, ...],
+) -> None:
+    if not target_url and not run_urls:
+        raise click.UsageError("Provide at least one of --url or --run-url.")
+
+    from cloud_service_enum.gcp.unauth import (
+        CloudRunUnauthScope,
+        run_cloudrun_unauth,
+    )
+
+    scope = CloudRunUnauthScope(
+        target_url=target_url,
+        urls=tuple(run_urls),
+        max_pages=max_pages,
+        max_concurrency=max_concurrency,
+        timeout_s=timeout_s,
+        user_agent=user_agent,
+        extra_hosts=tuple(extra_hosts),
+    )
+    run = run_async(run_cloudrun_unauth(scope))
+    emit_reports(run, output_dir, report_formats)
