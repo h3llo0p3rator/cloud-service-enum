@@ -19,17 +19,25 @@ class Ec2Service(AwsService):
         async with ctx.client("ec2") as ec2:
             instances = await self._instances(ec2, ctx.region)
             volumes = await self._volumes(ec2, ctx.region)
-            snapshots = await self._public_snapshots(ec2, ctx.region)
+            public_snapshots = await self._public_snapshots(ec2, ctx.region)
             amis = await self._public_amis(ec2, ctx.region)
             keypairs = await self._key_pairs(ec2, ctx.region)
             launch_templates: list[dict[str, Any]] = []
+            owned_snapshots: list[dict[str, Any]] = []
             if focused:
                 for inst in instances:
                     inst["user_data"] = await _instance_user_data(ec2, inst["id"])
                 launch_templates = await _launch_templates(ec2, ctx.region)
+                owned_snapshots = await self._owned_snapshots(ec2, ctx.region)
 
         result.resources.extend(
-            instances + volumes + snapshots + amis + keypairs + launch_templates
+            instances
+            + volumes
+            + public_snapshots
+            + owned_snapshots
+            + amis
+            + keypairs
+            + launch_templates
         )
         result.cis_fields.setdefault("per_region", {})[ctx.region] = {
             "instance_count": len(instances),
@@ -37,8 +45,12 @@ class Ec2Service(AwsService):
             "public_instances": sum(1 for i in instances if i.get("public_ip")),
             "volume_count": len(volumes),
             "unencrypted_volumes": sum(1 for v in volumes if not v.get("encrypted")),
-            "public_snapshots": len(snapshots),
+            "public_snapshots": len(public_snapshots),
             "public_amis": len(amis),
+            "snapshot_count": len(owned_snapshots),
+            "unencrypted_snapshots": sum(
+                1 for s in owned_snapshots if not s.get("encrypted")
+            ),
         }
 
     async def _instances(self, ec2: Any, region: str) -> list[dict[str, Any]]:
@@ -48,6 +60,7 @@ class Ec2Service(AwsService):
             for reservation in page.get("Reservations", []) or []:
                 for inst in reservation.get("Instances", []):
                     md = inst.get("MetadataOptions", {})
+                    profile_arn = inst.get("IamInstanceProfile", {}).get("Arn")
                     out.append(
                         {
                             "kind": "instance",
@@ -59,7 +72,8 @@ class Ec2Service(AwsService):
                             "private_ip": inst.get("PrivateIpAddress"),
                             "imds_http_tokens": md.get("HttpTokens"),
                             "imds_hop_limit": md.get("HttpPutResponseHopLimit"),
-                            "iam_profile": inst.get("IamInstanceProfile", {}).get("Arn"),
+                            "iam_profile": profile_arn,
+                            "iam_role": _profile_basename(profile_arn),
                             "vpc_id": inst.get("VpcId"),
                             "subnet_id": inst.get("SubnetId"),
                             "security_groups": [g["GroupId"] for g in inst.get("SecurityGroups", [])],
@@ -117,6 +131,50 @@ class Ec2Service(AwsService):
             for k in resp.get("KeyPairs", [])
         ]
 
+    async def _owned_snapshots(self, ec2: Any, region: str) -> list[dict[str, Any]]:
+        """Return EBS snapshots owned by the caller's account.
+
+        Attacker-relevant because cross-account snapshot-copy is a
+        standard credential-exfil path; we surface the source volume,
+        encryption posture and tags so auditors can spot "unencrypted
+        snapshot of an encrypted volume" patterns.
+        """
+        pages = await safe(paginate(ec2, "describe_snapshots", OwnerIds=["self"]))
+        if not pages:
+            return []
+        out: list[dict[str, Any]] = []
+        for snap in collect_items(pages, "Snapshots"):
+            out.append(
+                {
+                    "kind": "snapshot",
+                    "id": snap["SnapshotId"],
+                    "region": region,
+                    "volume_id": snap.get("VolumeId"),
+                    "volume_size": snap.get("VolumeSize"),
+                    "encrypted": snap.get("Encrypted", False),
+                    "kms_key_id": snap.get("KmsKeyId"),
+                    "state": snap.get("State"),
+                    "start_time": snap.get("StartTime"),
+                    "description": snap.get("Description"),
+                    "tags": {t["Key"]: t["Value"] for t in snap.get("Tags", []) or []},
+                }
+            )
+        return out
+
+
+def _profile_basename(profile_arn: str | None) -> str | None:
+    """Return the IAM role/profile name from an instance-profile ARN.
+
+    Instance profile ARNs look like
+    ``arn:aws:iam::123:instance-profile/my-role``; the basename is
+    almost always the role name (a profile and its role share a name
+    unless created out-of-band), which is what the operator will feed
+    into downstream ``aws iam get-role-policy`` calls.
+    """
+    if not profile_arn:
+        return None
+    return profile_arn.rsplit("/", 1)[-1]
+
 
 async def _instance_user_data(ec2: Any, instance_id: str) -> str | None:
     """Fetch and base64-decode the user-data attribute for one instance."""
@@ -156,6 +214,7 @@ async def _launch_templates(ec2: Any, region: str) -> list[dict[str, Any]]:
                 user_data = base64.b64decode(encoded).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 user_data = encoded
+        profile_arn = (data.get("IamInstanceProfile") or {}).get("Arn")
         out.append(
             {
                 "kind": "launch-template",
@@ -163,7 +222,8 @@ async def _launch_templates(ec2: Any, region: str) -> list[dict[str, Any]]:
                 "name": tpl.get("LaunchTemplateName"),
                 "region": region,
                 "default_version": tpl.get("DefaultVersionNumber"),
-                "iam_profile": (data.get("IamInstanceProfile") or {}).get("Arn"),
+                "iam_profile": profile_arn,
+                "iam_role": _profile_basename(profile_arn),
                 "image_id": data.get("ImageId"),
                 "user_data": user_data,
                 "script_language": "bash",

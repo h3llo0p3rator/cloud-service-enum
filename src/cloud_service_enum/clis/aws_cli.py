@@ -79,6 +79,16 @@ def _auth_options(fn):  # type: ignore[no-untyped-def]
     show_default=True,
     help="Maximum file size (KB) scanned per object.",
 )
+@click.option(
+    "--lambda-code/--no-lambda-code",
+    "lambda_code",
+    default=None,
+    help=(
+        "Download Lambda deployment zips via Code.Location, secret-scan each "
+        "text file and render a handler excerpt. Defaults on when --deep is "
+        "set or --service lambda is focused."
+    ),
+)
 @deep_scan_options
 @report_options
 def aws_enumerate(
@@ -101,6 +111,7 @@ def aws_enumerate(
     s3_secret_scan: bool | None,
     s3_scan_file_limit: int,
     s3_scan_size_limit_kb: int,
+    lambda_code: bool | None,
     deep_scan: bool | None,
     secret_scan: bool | None,
     output_dir,  # type: ignore[no-untyped-def]
@@ -139,6 +150,14 @@ def aws_enumerate(
             )
         else:
             s3_scan = s3_secret_scan
+        # Mirror the S3 scan heuristic: implied-on when lambda is focused
+        # or --deep is set; explicit --(no-)lambda-code always wins.
+        if lambda_code is None:
+            effective_lambda_code = effective_deep or (
+                bool(explicit_services) and "lambda" in explicit_services
+            )
+        else:
+            effective_lambda_code = lambda_code
         scope = Scope(
             provider=Provider.AWS,
             regions=region_list,
@@ -151,6 +170,7 @@ def aws_enumerate(
             s3_secret_scan=s3_scan,
             s3_scan_file_limit=s3_scan_file_limit,
             s3_scan_size_limit_kb=s3_scan_size_limit_kb,
+            lambda_code=effective_lambda_code,
         )
         return await run_provider(Provider.AWS, auth, scope, show_progress=not no_progress)
 

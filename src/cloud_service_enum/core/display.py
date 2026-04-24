@@ -30,6 +30,11 @@ _PREFERRED_COLUMNS: tuple[str, ...] = (
     "region",
     "identity",
     "impersonators",
+    # Attacker-useful shortcuts: the role name behind an instance's IAM
+    # profile is the value you actually feed into ``aws iam`` calls;
+    # ``principal_type`` is what classifies caller_identity rows.
+    "iam_role",
+    "principal_type",
 )
 # Fields that are always in the JSON report but add little in a terminal table.
 _NOISY_FIELDS: frozenset[str] = frozenset(
@@ -42,6 +47,9 @@ _NOISY_PREFIXES: tuple[str, ...] = ("scan_",)
 _DETAIL_ONLY_FIELDS: frozenset[str] = frozenset(
     {
         "policy_document",
+        "inline_policies",
+        "attached_policies",
+        "assume_role_policy",
         "env_vars",
         "app_settings",
         "connection_strings",
@@ -55,6 +63,12 @@ _DETAIL_ONLY_FIELDS: frozenset[str] = frozenset(
         "script_language",
         "secrets_found",
         "identity_details",
+        "code_files",
+        "handler_excerpt",
+        "access_keys",
+        "shared_with",
+        "event_sources",
+        "extensions",
     }
 )
 _MAX_EXTRA_COLUMNS = 4
@@ -233,6 +247,29 @@ def _render_row_details(console: Console, row: dict[str, Any]) -> None:
     if isinstance(policy_doc, (dict, list)):
         _render_policy_document(console, label or "policy", policy_doc)
 
+    assume_doc = row.get("assume_role_policy")
+    if isinstance(assume_doc, (dict, list)):
+        _render_policy_document(console, f"trust: {label}", assume_doc)
+
+    inline = row.get("inline_policies")
+    if isinstance(inline, list) and inline:
+        _render_inline_policies(console, label, inline)
+
+    attached = row.get("attached_policies")
+    if isinstance(attached, list) and attached:
+        _render_attached_policies(console, label, attached)
+
+    code_files = row.get("code_files")
+    if isinstance(code_files, list) and code_files:
+        _render_code_files(console, label, code_files)
+
+    handler_excerpt = row.get("handler_excerpt")
+    if isinstance(handler_excerpt, str) and handler_excerpt.strip():
+        runtime = str(row.get("runtime") or "")
+        _render_code_panel(
+            console, f"handler: {label}", handler_excerpt, _language_for_runtime(runtime)
+        )
+
     if isinstance(row.get("env_vars"), Mapping) and row["env_vars"]:
         _render_kv_panel(console, f"env: {label}", row["env_vars"], mask_values=True)
 
@@ -303,6 +340,98 @@ def _render_policy_document(
             padding=(0, 1),
         )
     )
+
+
+def _render_inline_policies(
+    console: Console, owner: str, policies: list[Mapping[str, Any]]
+) -> None:
+    """Render each inline-policy body as its own syntax-highlighted panel.
+
+    Inline policies are where training labs (and most real environments)
+    hide the high-value permissions — ``iam:PassRole``,
+    ``bedrock:InvokeModel``, ``ecr:PutImage``. Rendering each body
+    verbatim means the operator doesn't need to chase them with
+    ``aws iam get-role-policy``.
+    """
+    for entry in policies:
+        name = str(entry.get("name") or "inline")
+        body = entry.get("policy_document")
+        if isinstance(body, (dict, list)):
+            _render_policy_document(console, f"{owner} / inline: {name}", body)
+        elif body:
+            _render_code_panel(console, f"{owner} / inline: {name}", body, "text")
+
+
+def _render_attached_policies(
+    console: Console, owner: str, policies: list[Mapping[str, Any]]
+) -> None:
+    """Render the list of attached managed policies as a compact table."""
+    rows: list[tuple[str, str]] = []
+    for entry in policies:
+        rows.append((str(entry.get("name") or ""), str(entry.get("arn") or "")))
+    if not rows:
+        return
+    console.print(
+        Panel(
+            _kv_table(rows),
+            title=f"{owner} / attached policies ({len(rows)})",
+            border_style="muted",
+            padding=(0, 1),
+        )
+    )
+
+
+def _render_code_files(
+    console: Console, owner: str, code_files: list[Mapping[str, Any]]
+) -> None:
+    """Render a one-line-per-file table for Lambda deployment packages."""
+    table = Table(box=SIMPLE_HEAVY, show_lines=False, expand=False, pad_edge=False)
+    for col in ("path", "size", "note"):
+        table.add_column(col, overflow="fold")
+    for entry in code_files:
+        note_parts: list[str] = []
+        if entry.get("is_handler"):
+            note_parts.append("[info]handler[/info]")
+        if entry.get("secrets_found"):
+            note_parts.append(
+                f"[error]{len(entry['secrets_found'])} secret(s)[/error]"
+            )
+        if entry.get("note"):
+            note_parts.append(str(entry["note"]))
+        table.add_row(
+            str(entry.get("path", "")),
+            str(entry.get("size", "")),
+            " ".join(note_parts),
+        )
+    console.print(
+        Panel(
+            table,
+            title=f"{owner} / code ({len(code_files)} files)",
+            border_style="muted",
+            padding=(0, 1),
+        )
+    )
+
+
+_RUNTIME_LANGUAGE: dict[str, str] = {
+    "python": "python",
+    "nodejs": "javascript",
+    "node": "javascript",
+    "ruby": "ruby",
+    "go": "go",
+    "java": "java",
+    "dotnet": "csharp",
+    "provided": "bash",
+}
+
+
+def _language_for_runtime(runtime: str) -> str:
+    """Best-effort language pick for a Lambda ``runtime`` identifier."""
+    lowered = runtime.lower()
+    for prefix, lang in _RUNTIME_LANGUAGE.items():
+        if lowered.startswith(prefix):
+            return lang
+    return "text"
 
 
 def _render_code_panel(
@@ -480,21 +609,43 @@ def _render_identity_panel(
 
 
 def _render_secret_findings(console: Console, bucket: str, findings: list[dict[str, Any]]) -> None:
+    """Render findings with a confidence column so hints don't cry wolf.
+
+    Low-confidence hits (placeholder AKIA strings, ``DEPLOY_*`` env-var
+    names) are styled in muted grey with a ``(hint)`` suffix so the eye
+    skips over them unless nothing else is there.
+    """
     table = Table(box=SIMPLE_HEAVY, show_lines=False, expand=False, pad_edge=False)
-    for col in ("file", "type", "line", "value"):
+    for col in ("file", "type", "line", "value", "confidence"):
         table.add_column(col, overflow="fold")
+    high_count = 0
     for f in findings:
+        confidence = str(f.get("confidence", "high"))
+        is_low = confidence == "low"
+        if not is_low:
+            high_count += 1
+        row_type = str(f.get("type", ""))
+        conf_cell = (
+            "[muted]low (hint)[/muted]" if is_low else "[error]high[/error]"
+        )
+        value_cell = str(f.get("value", ""))
+        if is_low:
+            row_type = f"[muted]{row_type}[/muted]"
+            value_cell = f"[muted]{value_cell}[/muted]"
         table.add_row(
             str(f.get("file", "")),
-            str(f.get("type", "")),
+            row_type,
             str(f.get("line", "")),
-            str(f.get("value", "")),
+            value_cell,
+            conf_cell,
         )
+    border = "error" if high_count else "warning"
+    title_style = "error" if high_count else "warning"
     console.print(
         Panel(
             table,
-            title=f"[error]secrets in {bucket}[/error] ({len(findings)})",
-            border_style="error",
+            title=f"[{title_style}]secrets in {bucket}[/{title_style}] ({len(findings)})",
+            border_style=border,
             padding=(0, 1),
         )
     )

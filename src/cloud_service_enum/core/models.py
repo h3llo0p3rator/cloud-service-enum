@@ -70,6 +70,12 @@ class Scope(BaseModel):
     s3_secret_scan: bool = False
     s3_scan_file_limit: int = 100
     s3_scan_size_limit_kb: int = 500
+    # When set, LambdaService follows Code.Location and secret-scans the
+    # deployment zip. Implied-on when ``--deep`` is set or ``--service
+    # lambda`` is explicitly focused; opt out with ``--no-lambda-code``.
+    lambda_code: bool = False
+    lambda_code_size_limit_mb: int = 50
+    lambda_code_file_size_limit_kb: int = 256
 
 
 class ServiceResult(BaseModel):

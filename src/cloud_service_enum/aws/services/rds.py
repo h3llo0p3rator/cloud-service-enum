@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from cloud_service_enum.aws.base import AwsService, ServiceContext, collect_items, paginate, safe
 from cloud_service_enum.core.models import ServiceResult
 
@@ -12,15 +14,33 @@ class RdsService(AwsService):
 
     async def collect(self, ctx: ServiceContext, result: ServiceResult) -> None:
         focused = ctx.is_focused_on(self.service_name)
+        # Every RDS call must stay inside this ``async with`` so aioboto3
+        # can close the underlying aiohttp session cleanly. Previously
+        # the snapshot-attribute fetch ran after the block closed, which
+        # is what produced the "Unclosed client session" warning.
         async with ctx.client("rds") as rds:
             instances = collect_items(await paginate(rds, "describe_db_instances"), "DBInstances")
             clusters = collect_items(await paginate(rds, "describe_db_clusters"), "DBClusters")
             snapshots = collect_items(await paginate(rds, "describe_db_snapshots"), "DBSnapshots")
-            proxies = []
+            proxies: list[dict[str, Any]] = []
             if focused:
                 proxy_pages = await safe(paginate(rds, "describe_db_proxies"))
                 if proxy_pages:
                     proxies = collect_items(proxy_pages, "DBProxies")
+            snapshot_attrs: dict[str, list[dict[str, Any]]] = {}
+            if focused:
+                for s in snapshots:
+                    snap_id = s["DBSnapshotIdentifier"]
+                    attr_resp = await safe(
+                        rds.describe_db_snapshot_attributes(DBSnapshotIdentifier=snap_id)
+                    )
+                    attrs = (
+                        ((attr_resp or {}).get("DBSnapshotAttributesResult") or {})
+                        .get("DBSnapshotAttributes")
+                        or []
+                    )
+                    if attrs:
+                        snapshot_attrs[snap_id] = attrs
 
         for db in instances:
             result.resources.append(
@@ -62,25 +82,15 @@ class RdsService(AwsService):
                 }
             )
         for s in snapshots:
-            attrs = []
-            if focused:
-                attr_resp = await safe(
-                    rds.describe_db_snapshot_attributes(
-                        DBSnapshotIdentifier=s["DBSnapshotIdentifier"]
-                    )
-                )
-                attrs = (
-                    ((attr_resp or {}).get("DBSnapshotAttributesResult") or {})
-                    .get("DBSnapshotAttributes")
-                    or []
-                )
-            row = {
+            snap_id = s["DBSnapshotIdentifier"]
+            row: dict[str, Any] = {
                 "kind": "db-snapshot",
-                "id": s["DBSnapshotIdentifier"],
+                "id": snap_id,
                 "region": ctx.region,
                 "encrypted": s.get("Encrypted", False),
                 "engine": s.get("Engine"),
             }
+            attrs = snapshot_attrs.get(snap_id) or []
             if attrs:
                 row["shared_with"] = [
                     {"attribute": a.get("AttributeName"), "values": a.get("AttributeValues")}

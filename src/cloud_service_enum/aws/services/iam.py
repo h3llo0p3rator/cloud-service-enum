@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from cloud_service_enum.aws.base import (
     AwsService,
@@ -34,6 +34,7 @@ class IamService(AwsService):
     is_regional = False
 
     async def collect(self, ctx: ServiceContext, result: ServiceResult) -> None:
+        include_bodies = ctx.scope.iam_policy_bodies or ctx.is_focused_on(self.service_name)
         async with ctx.client("sts") as sts:
             caller = await safe(sts.get_caller_identity())
         async with ctx.client("iam") as iam:
@@ -41,13 +42,13 @@ class IamService(AwsService):
             # so a scoped role with no iam:List* still surfaces "here's
             # who you are and what you can assume" even when the broader
             # listing calls below blow up with AccessDenied.
-            caller_rows = await _caller_introspection(iam, caller)
+            caller_rows = await _caller_introspection(iam, caller, include_bodies)
             result.resources.extend(caller_rows)
 
-            users = await _try_list(self._users, iam)
-            roles = await _try_list(self._roles, iam)
-            groups = await _try_list(self._groups, iam)
-            policies = await _try_policies(self._managed_policies, iam, ctx.scope.iam_policy_bodies)
+            users = await _try(self._users, iam, include_bodies)
+            roles = await _try(self._roles, iam, include_bodies)
+            groups = await _try(self._groups, iam, include_bodies)
+            policies = await _try(self._managed_policies, iam, include_bodies)
             summary = (await safe(iam.get_account_summary())) or {}
             password_policy = (await safe(iam.get_account_password_policy())) or {}
 
@@ -67,7 +68,7 @@ class IamService(AwsService):
             "password_policy": password_policy.get("PasswordPolicy"),
         }
 
-    async def _users(self, iam: Any) -> list[dict[str, Any]]:
+    async def _users(self, iam: Any, include_bodies: bool) -> list[dict[str, Any]]:
         pages = await paginate(iam, "list_users")
         users = collect_items(pages, "Users")
         out: list[dict[str, Any]] = []
@@ -76,33 +77,36 @@ class IamService(AwsService):
             mfa = await safe(iam.list_mfa_devices(UserName=name))
             keys = await safe(iam.list_access_keys(UserName=name))
             login = await safe(iam.get_login_profile(UserName=name))
-            out.append(
-                {
-                    "kind": "user",
-                    "id": u["UserId"],
-                    "arn": u["Arn"],
-                    "name": name,
-                    "created": u.get("CreateDate"),
-                    "mfa_enabled": bool((mfa or {}).get("MFADevices")),
-                    "console_enabled": login is not None,
-                    "access_keys": [
-                        {
-                            "id": k["AccessKeyId"],
-                            "status": k["Status"],
-                            "created": k["CreateDate"],
-                            "stale": _stale(k["CreateDate"]),
-                        }
-                        for k in (keys or {}).get("AccessKeyMetadata", [])
-                    ],
-                    "last_used": u.get("PasswordLastUsed"),
-                }
-            )
+            row = {
+                "kind": "user",
+                "id": u["UserId"],
+                "arn": u["Arn"],
+                "name": name,
+                "created": u.get("CreateDate"),
+                "mfa_enabled": bool((mfa or {}).get("MFADevices")),
+                "console_enabled": login is not None,
+                "access_keys": [
+                    {
+                        "id": k["AccessKeyId"],
+                        "status": k["Status"],
+                        "created": k["CreateDate"],
+                        "stale": _stale(k["CreateDate"]),
+                    }
+                    for k in (keys or {}).get("AccessKeyMetadata", [])
+                ],
+                "last_used": u.get("PasswordLastUsed"),
+            }
+            if include_bodies:
+                row["inline_policies"] = await _inline_policies(iam, "user", name)
+                row["attached_policies"] = await _attached_policies(iam, "user", name)
+            out.append(row)
         return out
 
-    async def _roles(self, iam: Any) -> list[dict[str, Any]]:
+    async def _roles(self, iam: Any, include_bodies: bool) -> list[dict[str, Any]]:
         pages = await paginate(iam, "list_roles")
-        return [
-            {
+        out: list[dict[str, Any]] = []
+        for r in collect_items(pages, "Roles"):
+            row = {
                 "kind": "role",
                 "id": r["RoleId"],
                 "arn": r["Arn"],
@@ -111,21 +115,28 @@ class IamService(AwsService):
                 "assume_role_policy": r.get("AssumeRolePolicyDocument"),
                 "max_session_duration": r.get("MaxSessionDuration"),
             }
-            for r in collect_items(pages, "Roles")
-        ]
+            if include_bodies:
+                row["inline_policies"] = await _inline_policies(iam, "role", r["RoleName"])
+                row["attached_policies"] = await _attached_policies(iam, "role", r["RoleName"])
+            out.append(row)
+        return out
 
-    async def _groups(self, iam: Any) -> list[dict[str, Any]]:
+    async def _groups(self, iam: Any, include_bodies: bool) -> list[dict[str, Any]]:
         pages = await paginate(iam, "list_groups")
-        return [
-            {
+        out: list[dict[str, Any]] = []
+        for g in collect_items(pages, "Groups"):
+            row = {
                 "kind": "group",
                 "id": g["GroupId"],
                 "arn": g["Arn"],
                 "name": g["GroupName"],
                 "created": g.get("CreateDate"),
             }
-            for g in collect_items(pages, "Groups")
-        ]
+            if include_bodies:
+                row["inline_policies"] = await _inline_policies(iam, "group", g["GroupName"])
+                row["attached_policies"] = await _attached_policies(iam, "group", g["GroupName"])
+            out.append(row)
+        return out
 
     async def _managed_policies(
         self, iam: Any, include_bodies: bool
@@ -154,23 +165,15 @@ class IamService(AwsService):
         return out
 
 
-async def _try_list(fn: Any, iam: Any) -> list[dict[str, Any]]:
-    """Call a ``list_*`` enumerator, swallow AccessDenied / listing errors.
+async def _try(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """Call an async enumerator, swallow AccessDenied / listing errors.
 
     Lets us run the caller-identity introspection on credentials that
     can do ``sts:GetCallerIdentity`` + ``iam:Get*`` on themselves, but
     lack account-wide ``iam:List*`` — without aborting the whole scan.
     """
     try:
-        return await fn(iam)
-    except Exception:  # noqa: BLE001
-        return []
-
-
-async def _try_policies(fn: Any, iam: Any, include_bodies: bool) -> list[dict[str, Any]]:
-    """Same as :func:`_try_list` but for the 2-arg managed-policy fetcher."""
-    try:
-        return await fn(iam, include_bodies)
+        return await fn(*args, **kwargs)
     except Exception:  # noqa: BLE001
         return []
 
@@ -180,6 +183,84 @@ def _stale(created: Any, threshold_days: int = 90) -> bool:
         return (datetime.now(timezone.utc) - created).days > threshold_days
     except Exception:  # noqa: BLE001
         return False
+
+
+# ---------------------------------------------------------------------------
+# Inline / attached policy helpers (shared by listings + caller introspection)
+# ---------------------------------------------------------------------------
+
+_LIST_INLINE_OP: dict[str, str] = {
+    "user": "list_user_policies",
+    "role": "list_role_policies",
+    "group": "list_group_policies",
+}
+_GET_INLINE_OP: dict[str, str] = {
+    "user": "get_user_policy",
+    "role": "get_role_policy",
+    "group": "get_group_policy",
+}
+_LIST_ATTACHED_OP: dict[str, str] = {
+    "user": "list_attached_user_policies",
+    "role": "list_attached_role_policies",
+    "group": "list_attached_group_policies",
+}
+_ENTITY_NAME_KW: dict[str, str] = {
+    "user": "UserName",
+    "role": "RoleName",
+    "group": "GroupName",
+}
+
+
+async def _inline_policies(
+    iam: Any, kind: str, name: str
+) -> list[dict[str, Any]]:
+    """Fetch every inline policy attached directly to ``name``.
+
+    Returns ``[{"name": str, "policy_document": dict | None}]`` — one
+    entry per inline policy, with the body resolved via
+    ``get_*_policy`` when readable.
+    """
+    list_op = _LIST_INLINE_OP.get(kind)
+    get_op = _GET_INLINE_OP.get(kind)
+    name_kw = _ENTITY_NAME_KW.get(kind)
+    if not (list_op and get_op and name_kw):
+        return []
+    listing = await safe(getattr(iam, list_op)(**{name_kw: name}))
+    if not listing:
+        return []
+    out: list[dict[str, Any]] = []
+    for pol_name in listing.get("PolicyNames", []) or []:
+        body = await safe(
+            getattr(iam, get_op)(**{name_kw: name, "PolicyName": pol_name})
+        )
+        out.append(
+            {
+                "name": pol_name,
+                "policy_document": (body or {}).get("PolicyDocument"),
+            }
+        )
+    return out
+
+
+async def _attached_policies(
+    iam: Any, kind: str, name: str
+) -> list[dict[str, Any]]:
+    """List customer/AWS-managed policies attached to ``name``.
+
+    Returns the ARN + PolicyName pairs only — the JSON bodies live on the
+    standalone ``kind: policy`` rows when ``--iam-policy-bodies`` is on.
+    """
+    list_op = _LIST_ATTACHED_OP.get(kind)
+    name_kw = _ENTITY_NAME_KW.get(kind)
+    if not (list_op and name_kw):
+        return []
+    listing = await safe(getattr(iam, list_op)(**{name_kw: name}))
+    if not listing:
+        return []
+    return [
+        {"name": pol.get("PolicyName"), "arn": pol.get("PolicyArn")}
+        for pol in listing.get("AttachedPolicies", []) or []
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -265,44 +346,29 @@ def _extract_assumable(
     return out
 
 
-async def _policies_for_user(iam: Any, name: str) -> list[dict[str, Any]]:
-    """Return caller_policy rows for an IAM user principal."""
-    inline = await safe(iam.list_user_policies(UserName=name))
-    attached = await safe(iam.list_attached_user_policies(UserName=name))
-    rows: list[dict[str, Any]] = []
-    for pol_name in (inline or {}).get("PolicyNames", []):
-        body = await safe(iam.get_user_policy(UserName=name, PolicyName=pol_name))
-        rows.append(
-            {
-                "kind": "caller_policy",
-                "source": "inline",
-                "name": pol_name,
-                "arn": "",
-                "policy_document": (body or {}).get("PolicyDocument"),
-            }
-        )
-    for pol in (attached or {}).get("AttachedPolicies", []):
-        rows.append(await _resolve_managed(iam, pol))
-    return rows
+async def _caller_inline_policies(iam: Any, kind: str, name: str) -> list[dict[str, Any]]:
+    """Inline policy rows shaped like ``caller_policy`` entries."""
+    return [
+        {
+            "kind": "caller_policy",
+            "source": "inline",
+            "name": entry["name"],
+            "arn": "",
+            "policy_document": entry["policy_document"],
+        }
+        for entry in await _inline_policies(iam, kind, name)
+    ]
 
 
-async def _policies_for_role(iam: Any, name: str) -> list[dict[str, Any]]:
-    """Return caller_policy rows for an IAM role principal."""
-    inline = await safe(iam.list_role_policies(RoleName=name))
-    attached = await safe(iam.list_attached_role_policies(RoleName=name))
+async def _caller_attached_policies(iam: Any, kind: str, name: str) -> list[dict[str, Any]]:
+    """Attached-policy rows with the default version body resolved."""
+    list_op = _LIST_ATTACHED_OP.get(kind)
+    name_kw = _ENTITY_NAME_KW.get(kind)
+    if not (list_op and name_kw):
+        return []
+    attached = await safe(getattr(iam, list_op)(**{name_kw: name}))
     rows: list[dict[str, Any]] = []
-    for pol_name in (inline or {}).get("PolicyNames", []):
-        body = await safe(iam.get_role_policy(RoleName=name, PolicyName=pol_name))
-        rows.append(
-            {
-                "kind": "caller_policy",
-                "source": "inline",
-                "name": pol_name,
-                "arn": "",
-                "policy_document": (body or {}).get("PolicyDocument"),
-            }
-        )
-    for pol in (attached or {}).get("AttachedPolicies", []):
+    for pol in (attached or {}).get("AttachedPolicies", []) or []:
         rows.append(await _resolve_managed(iam, pol))
     return rows
 
@@ -327,7 +393,9 @@ async def _resolve_managed(iam: Any, pol: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _caller_introspection(iam: Any, caller: Any) -> list[dict[str, Any]]:
+async def _caller_introspection(
+    iam: Any, caller: Any, include_bodies: bool
+) -> list[dict[str, Any]]:
     """Produce caller_identity + caller_policy + assumable_role rows.
 
     All IAM calls are wrapped in :func:`safe`, so when the principal
@@ -345,10 +413,15 @@ async def _caller_introspection(iam: Any, caller: Any) -> list[dict[str, Any]]:
     principal_type, principal_name = _classify_caller(arn)
 
     policy_rows: list[dict[str, Any]] = []
-    if principal_type == "user" and principal_name:
-        policy_rows = await _policies_for_user(iam, principal_name)
-    elif principal_type in {"role", "assumed-role"} and principal_name:
-        policy_rows = await _policies_for_role(iam, principal_name)
+    if include_bodies and principal_name:
+        kind = "user" if principal_type == "user" else (
+            "role" if principal_type in {"role", "assumed-role"} else None
+        )
+        if kind:
+            policy_rows = [
+                *(await _caller_inline_policies(iam, kind, principal_name)),
+                *(await _caller_attached_policies(iam, kind, principal_name)),
+            ]
 
     assumable_rows: list[dict[str, Any]] = []
     for row in policy_rows:
