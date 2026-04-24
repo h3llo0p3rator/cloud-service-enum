@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from azure.core.credentials import AccessToken
 from azure.core.credentials_async import AsyncTokenCredential
@@ -19,6 +23,19 @@ from azure.identity.aio import (
 
 from cloud_service_enum.core.auth import CloudAuthenticator, IdentitySummary
 from cloud_service_enum.core.errors import AuthenticationError
+
+_logger = logging.getLogger(__name__)
+
+BearerResource = Literal["management", "graph", "vault", "devops", "arm"]
+
+_BEARER_RESOURCE_SCOPES: dict[str, str] = {
+    "management": "https://management.azure.com/.default",
+    "arm": "https://management.azure.com/.default",
+    "graph": "https://graph.microsoft.com/.default",
+    "vault": "https://vault.azure.net/.default",
+    # Azure DevOps SPN app id
+    "devops": "499b84ac-1321-427f-aa17-267ca6975798/.default",
+}
 
 
 class _SharedCredential(AsyncTokenCredential):
@@ -43,6 +60,64 @@ class _SharedCredential(AsyncTokenCredential):
         return None
 
     async def __aenter__(self) -> _SharedCredential:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+def _expiry_from_jwt(token: str) -> int:
+    """Return the ``exp`` claim from a JWT, or ``now + 60 min`` if missing.
+
+    Bearer tokens supplied via ``--bearer-token`` are not validated — we
+    simply peek at the unsigned payload to learn when they'll stop
+    working so token-refresh loops in the SDK do not thrash.
+    """
+    fallback = int(time.time()) + 3600
+    parts = token.split(".")
+    if len(parts) < 2:
+        return fallback
+    try:
+        payload = parts[1]
+        padded = payload + "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        _logger.warning(
+            "Could not decode bearer token payload; assuming 60 minute lifetime."
+        )
+        return fallback
+    exp = claims.get("exp")
+    if isinstance(exp, int):
+        return exp
+    _logger.warning(
+        "Bearer token has no 'exp' claim; assuming 60 minute lifetime."
+    )
+    return fallback
+
+
+class _StaticBearerCredential(AsyncTokenCredential):
+    """Return a pre-issued bearer token regardless of requested scope.
+
+    The token is intended to be replayed against a single resource (the
+    one encoded in its ``aud`` claim). Callers pick which resource the
+    token is aimed at via ``AzureAuthConfig.bearer_resource`` — services
+    that need a different scope will simply fail to acquire a token and
+    surface the error in their result.
+    """
+
+    __slots__ = ("_token",)
+
+    def __init__(self, token: str, expires_on: int | None = None) -> None:
+        self._token = AccessToken(token, expires_on or _expiry_from_jwt(token))
+
+    async def get_token(self, *scopes: str, **kwargs: Any) -> AccessToken:
+        _ = scopes, kwargs
+        return self._token
+
+    async def close(self) -> None:
+        return None
+
+    async def __aenter__(self) -> _StaticBearerCredential:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -93,6 +168,7 @@ class AzureAuthConfig:
     """Inputs describing how to build an Azure credential.
 
     Supported auth methods, in order of precedence:
+    - pre-issued bearer token (``bearer_token``)
     - service principal with secret (``tenant_id`` + ``client_id`` + ``client_secret``)
     - service principal with certificate (``tenant_id`` + ``client_id`` + ``certificate_path``)
     - username + password (``tenant_id`` + ``client_id`` + ``username`` + ``password``)
@@ -113,10 +189,15 @@ class AzureAuthConfig:
     use_managed_identity: bool = False
     use_cli: bool = False
     subscription_id: str | None = None
+    bearer_token: str | None = None
+    bearer_resource: BearerResource = "management"
+    bearer_expires_on: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def method(self) -> str:
+        if self.bearer_token:
+            return "bearer-token"
         if self.client_secret:
             return "client-secret"
         if self.certificate_path:
@@ -131,6 +212,13 @@ class AzureAuthConfig:
             return "azure-cli"
         return "default-chain"
 
+    @property
+    def bearer_scope(self) -> str:
+        """Resolve ``bearer_resource`` to the full OAuth scope URI."""
+        return _BEARER_RESOURCE_SCOPES.get(
+            self.bearer_resource, _BEARER_RESOURCE_SCOPES["management"]
+        )
+
 
 class AzureAuthenticator(CloudAuthenticator):
     """Builds and caches an async Azure credential."""
@@ -144,6 +232,10 @@ class AzureAuthenticator(CloudAuthenticator):
 
     def _build(self) -> AsyncTokenCredential:
         cfg = self.config
+        if cfg.bearer_token:
+            return _StaticBearerCredential(
+                cfg.bearer_token, expires_on=cfg.bearer_expires_on
+            )
         if cfg.client_secret and cfg.tenant_id and cfg.client_id:
             return ClientSecretCredential(
                 tenant_id=cfg.tenant_id,
@@ -191,11 +283,20 @@ class AzureAuthenticator(CloudAuthenticator):
 
     async def test(self) -> IdentitySummary:
         cred = self.credential()
+        scope = (
+            self.config.bearer_scope
+            if self.config.bearer_token
+            else "https://management.azure.com/.default"
+        )
         try:
-            token = await cred.get_token("https://management.azure.com/.default")
+            token = await cred.get_token(scope)
         except Exception as exc:
             raise AuthenticationError(f"failed to acquire Azure token: {exc}") from exc
-        principal = self.config.client_id or self.config.username or "default-identity"
+        principal = (
+            self.config.client_id
+            or self.config.username
+            or ("bearer-token" if self.config.bearer_token else "default-identity")
+        )
         return IdentitySummary(
             provider="azure",
             principal=principal,

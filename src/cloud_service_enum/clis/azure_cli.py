@@ -36,6 +36,34 @@ def _auth_options(fn):  # type: ignore[no-untyped-def]
     fn = click.option("--use-managed-identity", is_flag=True, help="Use the assigned managed identity.")(fn)
     fn = click.option("--use-cli", is_flag=True, help="Use `az login` credentials.")(fn)
     fn = click.option("--subscription", "subscription_id", help="Limit to a single subscription id.")(fn)
+    fn = click.option(
+        "--bearer-token",
+        "bearer_token",
+        default=None,
+        help=(
+            "Replay a pre-issued OAuth bearer token (e.g. an exfiltrated "
+            "managed-identity JWT). Takes precedence over every other "
+            "auth flag."
+        ),
+    )(fn)
+    fn = click.option(
+        "--bearer-resource",
+        "bearer_resource",
+        type=click.Choice(["management", "graph", "vault", "devops", "arm"]),
+        default="management",
+        show_default=True,
+        help="Resource the bearer token was issued for.",
+    )(fn)
+    fn = click.option(
+        "--bearer-expires-on",
+        "bearer_expires_on",
+        type=int,
+        default=None,
+        help=(
+            "Override the JWT 'exp' claim with a unix timestamp "
+            "(only needed for opaque / non-JWT tokens)."
+        ),
+    )(fn)
     return fn
 
 
@@ -52,6 +80,24 @@ def _build_auth(**kw):  # type: ignore[no-untyped-def]
 @click.option("--max-concurrency", type=int, default=10, show_default=True)
 @click.option("--timeout", "timeout_s", type=float, default=120.0, show_default=True)
 @click.option("--no-progress", is_flag=True, help="Disable the Rich progress bar.")
+@click.option(
+    "--devops-org",
+    "devops_org",
+    default=None,
+    help=(
+        "Azure DevOps organization name (required for the `devops` "
+        "service; it will skip silently otherwise)."
+    ),
+)
+@click.option(
+    "--devops-pat",
+    "devops_pat",
+    default=None,
+    help=(
+        "Azure DevOps Personal Access Token. Takes precedence over "
+        "--bearer-token when hitting dev.azure.com."
+    ),
+)
 @deep_scan_options
 @report_options
 def azure_enumerate(
@@ -66,10 +112,15 @@ def azure_enumerate(
     use_managed_identity: bool,
     use_cli: bool,
     subscription_id: str | None,
+    bearer_token: str | None,
+    bearer_resource: str,
+    bearer_expires_on: int | None,
     services: tuple[str, ...],
     max_concurrency: int,
     timeout_s: float,
     no_progress: bool,
+    devops_org: str | None,
+    devops_pat: str | None,
     deep_scan: bool | None,
     secret_scan: bool | None,
     output_dir,  # type: ignore[no-untyped-def]
@@ -87,6 +138,9 @@ def azure_enumerate(
         use_managed_identity=use_managed_identity,
         use_cli=use_cli,
         subscription_id=subscription_id,
+        bearer_token=bearer_token,
+        bearer_resource=bearer_resource,
+        bearer_expires_on=bearer_expires_on,
     )
     service_list = list(services)
     effective_deep, effective_secret = resolve_deep_flags(
@@ -102,6 +156,8 @@ def azure_enumerate(
         timeout_s=timeout_s,
         deep_scan=effective_deep,
         secret_scan=effective_secret,
+        devops_org=devops_org,
+        devops_pat=devops_pat,
     )
     run = run_async(run_provider(Provider.AZURE, auth, scope, show_progress=not no_progress))
     emit_reports(run, output_dir, report_formats)
@@ -150,6 +206,9 @@ def azure_mfa(
     use_managed_identity: bool,
     use_cli: bool,
     subscription_id: str | None,
+    bearer_token: str | None,
+    bearer_resource: str,
+    bearer_expires_on: int | None,
     mfa_password: str | None,
     mfa_tenant: str | None,
     skip_confirm: bool,
@@ -180,6 +239,9 @@ def azure_mfa(
         use_managed_identity=use_managed_identity,
         use_cli=use_cli,
         subscription_id=subscription_id,
+        bearer_token=bearer_token,
+        bearer_resource=bearer_resource,
+        bearer_expires_on=bearer_expires_on,
     )
     scope = Scope(
         provider=Provider.AZURE,
