@@ -207,3 +207,35 @@ def collect_profiles(
         ).splitlines():
             _add(line)
     return tuple(ordered)
+
+
+def split_csv(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Flatten repeatable CLI values that may include comma-separated entries."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        for piece in raw.split(","):
+            item = piece.strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+    return tuple(out)
+
+
+def normalize_download_selection(
+    *,
+    download: bool,
+    download_all: bool,
+    files: tuple[str, ...],
+    files_csv: tuple[str, ...],
+) -> tuple[bool, bool, tuple[str, ...]]:
+    """Validate + normalize download selector flags.
+
+    Returns ``(effective_download, effective_download_all, selected_files)``.
+    """
+    selected = split_csv(files + files_csv)
+    if download_all and selected:
+        raise click.UsageError("Use either --download-all or --file/--files, not both.")
+    effective_download = download or download_all or bool(selected)
+    return effective_download, download_all, selected

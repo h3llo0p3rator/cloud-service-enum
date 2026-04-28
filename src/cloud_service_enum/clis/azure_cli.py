@@ -9,9 +9,11 @@ import click
 from cloud_service_enum.clis.common import (
     deep_scan_options,
     emit_reports,
+    normalize_download_selection,
     report_options,
     resolve_deep_flags,
     run_async,
+    split_csv,
     unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
@@ -77,6 +79,12 @@ def _build_auth(**kw):  # type: ignore[no-untyped-def]
 @azure.command("enumerate", help="Run a full or scoped Azure enumeration.")
 @_auth_options
 @click.option("--service", "services", multiple=True, help="Restrict to given service(s).")
+@click.option("--download/--no-download", default=False, show_default=True, help="Enable storage object download mode.")
+@click.option("--download-all", is_flag=True, default=False, help="Download all objects from resolved storage targets.")
+@click.option("--account", "download_accounts", multiple=True, help="Storage account target for download mode (repeatable).")
+@click.option("--container", "download_containers", multiple=True, help="Storage container target for download mode (repeatable).")
+@click.option("--file", "download_files", multiple=True, help="Specific object key to download (repeatable).")
+@click.option("--files", "download_files_csv", multiple=True, help="Comma-separated object keys to download.")
 @click.option("--max-concurrency", type=int, default=10, show_default=True)
 @click.option("--timeout", "timeout_s", type=float, default=120.0, show_default=True)
 @click.option("--no-progress", is_flag=True, help="Disable the Rich progress bar.")
@@ -116,6 +124,12 @@ def azure_enumerate(
     bearer_resource: str,
     bearer_expires_on: int | None,
     services: tuple[str, ...],
+    download: bool,
+    download_all: bool,
+    download_accounts: tuple[str, ...],
+    download_containers: tuple[str, ...],
+    download_files: tuple[str, ...],
+    download_files_csv: tuple[str, ...],
     max_concurrency: int,
     timeout_s: float,
     no_progress: bool,
@@ -148,6 +162,16 @@ def azure_enumerate(
         deep_scan=deep_scan,
         secret_scan=secret_scan,
     )
+    effective_download, effective_download_all, selected_files = normalize_download_selection(
+        download=download,
+        download_all=download_all,
+        files=download_files,
+        files_csv=download_files_csv,
+    )
+    if effective_download and service_list and "storage" not in service_list:
+        raise click.UsageError(
+            "Storage download flags require --service storage (or omit --service for full enumerate)."
+        )
     scope = Scope(
         provider=Provider.AZURE,
         subscription_ids=[subscription_id] if subscription_id else [],
@@ -158,6 +182,11 @@ def azure_enumerate(
         secret_scan=effective_secret,
         devops_org=devops_org,
         devops_pat=devops_pat,
+        download=effective_download,
+        download_all=effective_download_all,
+        download_files=list(selected_files),
+        download_accounts=list(split_csv(download_accounts)),
+        download_containers=list(split_csv(download_containers)),
     )
     run = run_async(run_provider(Provider.AZURE, auth, scope, show_progress=not no_progress))
     emit_reports(run, output_dir, report_formats)
@@ -344,6 +373,10 @@ def azure_unauth() -> None:  # noqa: D401
 )
 @click.option("--max-blobs", type=int, default=100, show_default=True)
 @click.option("--max-blob-size-kb", type=int, default=500, show_default=True)
+@click.option("--download/--no-download", default=False, show_default=True, help="Enable blob download mode.")
+@click.option("--download-all", is_flag=True, default=False, help="Download all blobs from resolved containers.")
+@click.option("--file", "download_files", multiple=True, help="Specific blob key to download (repeatable).")
+@click.option("--files", "download_files_csv", multiple=True, help="Comma-separated blob keys to download.")
 @unauth_crawler_options
 @report_options
 def azure_unauth_storage(
@@ -357,6 +390,10 @@ def azure_unauth_storage(
     container_wordlist: Path | None,
     max_blobs: int,
     max_blob_size_kb: int,
+    download: bool,
+    download_all: bool,
+    download_files: tuple[str, ...],
+    download_files_csv: tuple[str, ...],
     max_pages: int,
     max_concurrency: int,
     timeout_s: float,
@@ -377,6 +414,12 @@ def azure_unauth_storage(
         raise click.UsageError(
             "--bruteforce-container requires --container-wordlist."
         )
+    effective_download, effective_download_all, selected_files = normalize_download_selection(
+        download=download,
+        download_all=download_all,
+        files=download_files,
+        files_csv=download_files_csv,
+    )
 
     from cloud_service_enum.azure.unauth import StorageUnauthScope, run_storage_unauth
 
@@ -391,6 +434,9 @@ def azure_unauth_storage(
         container_wordlist=container_wordlist,
         max_blobs=max_blobs,
         max_blob_size_kb=max_blob_size_kb,
+        download=effective_download,
+        download_all=effective_download_all,
+        download_files=selected_files,
         max_pages=max_pages,
         max_concurrency=max_concurrency,
         timeout_s=timeout_s,

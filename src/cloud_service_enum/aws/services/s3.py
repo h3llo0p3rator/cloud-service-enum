@@ -7,6 +7,7 @@ from typing import Any
 
 from cloud_service_enum.aws.base import AwsService, ServiceContext, safe
 from cloud_service_enum.aws.secret_scanner import scan_bucket_for_secrets
+from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import ServiceResult
 
 
@@ -35,6 +36,9 @@ class S3Service(AwsService):
             if not rec.get("encryption"):
                 unencrypted += 1
             total_secrets += len(rec.get("secrets_found") or [])
+        if ctx.scope.download:
+            downloaded = await self._download_objects(s3, buckets, ctx)
+            result.resources.extend(downloaded)
 
         result.cis_fields = {
             "bucket_count": len(buckets),
@@ -43,6 +47,10 @@ class S3Service(AwsService):
         }
         if ctx.scope.s3_secret_scan:
             result.cis_fields["secrets_found"] = total_secrets
+        if ctx.scope.download:
+            result.cis_fields["objects_downloaded"] = sum(
+                1 for r in result.resources if r.get("kind") == "downloaded_object"
+            )
 
     async def _bucket_details(
         self, s3: Any, bucket: dict[str, Any], ctx: ServiceContext
@@ -101,3 +109,52 @@ class S3Service(AwsService):
             record["scan_files_skipped_type"] = summary.files_skipped_type
             record["secrets_found"] = [f.as_dict() for f in summary.findings]
         return record
+
+    async def _download_objects(
+        self,
+        s3: Any,
+        buckets: list[dict[str, Any]],
+        ctx: ServiceContext,
+    ) -> list[dict[str, Any]]:
+        selected_buckets = set(ctx.scope.download_buckets or [])
+        selected_files = set(ctx.scope.download_files or [])
+        rows: list[dict[str, Any]] = []
+        for bucket in buckets:
+            name = bucket.get("Name")
+            if not name:
+                continue
+            if selected_buckets and name not in selected_buckets:
+                continue
+            try:
+                paginator = s3.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(Bucket=name):
+                    for obj in page.get("Contents", []) or []:
+                        key = obj.get("Key")
+                        if not key:
+                            continue
+                        if not ctx.scope.download_all and selected_files and key not in selected_files:
+                            continue
+                        if not ctx.scope.download_all and not selected_files:
+                            continue
+                        payload = await safe(s3.get_object(Bucket=name, Key=key))
+                        if not payload:
+                            continue
+                        body = payload.get("Body")
+                        if body is None:
+                            continue
+                        blob = await body.read()
+                        destination = loot_destination(owner=name, key=key)
+                        destination.write_bytes(blob)
+                        rows.append(
+                            {
+                                "kind": "downloaded_object",
+                                "id": f"{name}/{key}",
+                                "name": key,
+                                "bucket": name,
+                                "bytes": len(blob),
+                                "loot_path": str(destination),
+                            }
+                        )
+            except Exception:  # noqa: BLE001
+                continue
+        return rows

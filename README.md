@@ -273,6 +273,10 @@ cse aws enumerate --profile my-profile --deep --no-secret-scan
 # Disable the auto-enabled secret scan when focusing on s3
 cse aws enumerate --profile my-profile --service s3 --no-secret-scan
 
+# Focus S3 and download selected/all objects into loot/<bucket>/...
+cse aws enumerate --profile my-profile --service s3 --bucket acme-assets --download --files manifest.json,inventory/latest.csv
+cse aws enumerate --profile my-profile --service s3 --bucket acme-assets --download --download-all
+
 # Assume a role + emit JSON and XLSX reports
 cse aws enumerate \
   --profile my-profile \
@@ -375,6 +379,10 @@ cse aws unauth s3 --url https://app.example.com --bucket acme-assets
 cse aws unauth s3 --bruteforce \
   --bruteforce-prefix acme --bruteforce-prefix acme-prod
 
+# Download specific objects or everything into loot/<bucket>/...
+cse aws unauth s3 --bucket acme-assets --download --file manifest.json
+cse aws unauth s3 --bucket acme-assets --download --download-all
+
 # Fingerprint every API Gateway / Lambda Function URL the web app references.
 cse aws unauth api-gateway --url https://app.example.com
 
@@ -400,6 +408,10 @@ cse azure unauth storage --url https://app.example.com
 cse azure unauth storage --bruteforce \
   --bruteforce-prefix acme --bruteforce-prefix acmeprod
 
+# Azure: download blobs into loot/<container>/...
+cse azure unauth storage --account exampleaccount --container data --download --files a.json,b.csv
+cse azure unauth storage --account exampleaccount --download --download-all
+
 # Azure: discover *.azurewebsites.net hosts + probe canonical leak
 # paths (Kudu anonymous access, /.git/HEAD, /.env, …).
 cse azure unauth appservice --url https://portal.example.com
@@ -412,6 +424,10 @@ cse gcp unauth bucket --url https://app.example.com
 # GCP: wordlist bruteforce for bucket names.
 cse gcp unauth bucket --bruteforce \
   --bruteforce-prefix acme --bruteforce-prefix acme-prod
+
+# GCP: download objects into loot/<bucket>/...
+cse gcp unauth bucket --bucket acme-assets --download --file exports/latest.json
+cse gcp unauth bucket --bucket acme-assets --download --download-all
 
 # GCP: extract *.run.app URLs + classify auth posture.
 cse gcp unauth cloudrun --url https://app.example.com
@@ -429,6 +445,10 @@ cse azure enumerate \
   --client-secret $AZURE_CLIENT_SECRET \
   --subscription $AZURE_SUBSCRIPTION_ID
 
+# Focus Azure Storage and download selected/all blobs
+cse azure enumerate --service storage --use-cli --account exampleaccount --container examplecontainer --download --file example.json --file example2.csv
+cse azure enumerate --service storage --use-cli --account exampleaccount --download --download-all
+
 # Microsoft Graph MFA status across every user
 cse azure mfa \
   --tenant-id $AZURE_TENANT_ID \
@@ -445,6 +465,10 @@ cse gcp enumerate --service-account-file ./sa.json
 
 # Focused IAM walk: dumps service-account impersonation paths and custom roles
 cse gcp enumerate --service-account-file ./sa.json --service iam
+
+# Focus GCS storage and download selected/all objects
+cse gcp enumerate --service-account-file ./sa.json --service storage --bucket acme-assets --download --files report.csv,summary.json
+cse gcp enumerate --service-account-file ./sa.json --service storage --bucket acme-assets --download --download-all
 ```
 
 ### OSINT

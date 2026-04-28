@@ -6,6 +6,7 @@ from azure.mgmt.storage.aio import StorageManagementClient
 
 from cloud_service_enum.azure.auth import AzureAuthenticator
 from cloud_service_enum.azure.base import AzureService, attach_identity, iter_async
+from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import ServiceResult
 
 
@@ -19,6 +20,7 @@ class StorageService(AzureService):
         async with StorageManagementClient(auth.credential(), subscription_id) as client:
             accounts = await iter_async(client.storage_accounts.list())
             enriched: list[dict] = []
+            downloaded_count = 0
             for a in accounts:
                 rg = a.id.split("/")[4]
                 blob_props = None
@@ -61,12 +63,28 @@ class StorageService(AzureService):
                 if focused:
                     await self._enrich(client, rg, a, row)
                 enriched.append(row)
+                if self.scope and self.scope.download:
+                    try:
+                        downloaded = await self._download_blobs_for_account(
+                            client,
+                            rg,
+                            a.name,
+                            self.scope.download_containers,
+                            self.scope.download_files,
+                            self.scope.download_all,
+                        )
+                    except Exception:  # noqa: BLE001
+                        downloaded = []
+                    downloaded_count += len(downloaded)
+                    result.resources.extend(downloaded)
         result.resources.extend(enriched)
         result.cis_fields.setdefault("per_subscription", {})[subscription_id] = {
             "storage_account_count": len(enriched),
             "accounts_without_https_only": sum(1 for r in enriched if not r.get("https_only")),
             "accounts_allowing_public_blob": sum(1 for r in enriched if r.get("allow_blob_public_access")),
         }
+        if self.scope and self.scope.download:
+            result.cis_fields.setdefault("per_subscription", {})[subscription_id]["objects_downloaded"] = downloaded_count
 
     @staticmethod
     async def _enrich(client: StorageManagementClient, rg: str, a, row: dict) -> None:
@@ -81,6 +99,67 @@ class StorageService(AzureService):
                 }
         except Exception:  # noqa: BLE001
             pass
+
+    async def _download_blobs_for_account(
+        self,
+        client: StorageManagementClient,
+        resource_group: str,
+        account_name: str,
+        selected_containers: list[str],
+        selected_files: list[str],
+        download_all: bool,
+    ) -> list[dict]:
+        try:
+            from azure.storage.blob import BlobServiceClient
+        except ImportError:
+            return []
+
+        scope = self.scope
+        if scope and scope.download_accounts and account_name not in set(scope.download_accounts):
+            return []
+        keys = await client.storage_accounts.list_keys(resource_group, account_name)
+        if not keys or not keys.keys:
+            return []
+        key = keys.keys[0].value
+        if not key:
+            return []
+        svc = BlobServiceClient(
+            account_url=f"https://{account_name}.blob.core.windows.net",
+            credential=key,
+        )
+        rows: list[dict] = []
+        container_filter = set(selected_containers or [])
+        file_filter = set(selected_files or [])
+        for container in svc.list_containers():
+            container_name = container.get("name")
+            if not container_name:
+                continue
+            if container_filter and container_name not in container_filter:
+                continue
+            cclient = svc.get_container_client(container_name)
+            for blob in cclient.list_blobs():
+                blob_name = blob.get("name")
+                if not blob_name:
+                    continue
+                if not download_all and file_filter and blob_name not in file_filter:
+                    continue
+                if not download_all and not file_filter:
+                    continue
+                data = cclient.get_blob_client(blob_name).download_blob().readall()
+                destination = loot_destination(owner=container_name, key=blob_name)
+                destination.write_bytes(data)
+                rows.append(
+                    {
+                        "kind": "downloaded_object",
+                        "id": f"{account_name}/{container_name}/{blob_name}",
+                        "name": blob_name,
+                        "account": account_name,
+                        "container": container_name,
+                        "bytes": len(data),
+                        "loot_path": str(destination),
+                    }
+                )
+        return rows
         try:
             policy = await client.management_policies.get(rg, a.name, "default")
             if policy and policy.policy:

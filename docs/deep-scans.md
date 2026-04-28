@@ -85,7 +85,7 @@ without opening a second terminal. Covered services include
 | Service | Extra fields fetched in deep mode |
 |---------|------------------------------------|
 | `automation` | New module. Runbook `script` + `script_language` (regex-scanned), `schedule` metadata, `credential` metadata, unencrypted `variable` values. |
-| `storage` | Account `keys` (masked into `env_vars`), `management_policy`, `private_endpoints`. |
+| `storage` | Account `keys` (masked into `env_vars`), `management_policy`, `private_endpoints`, optional blob downloads into `loot/<container>/...` when `--download` is enabled on `cse azure enumerate --service storage`. |
 | `keyvault` | `access_policies` rendered as `role_bindings`. |
 | `appservice` | `application_settings` (regex-scanned), `connection_strings`, `auth_settings_v2`, detailed `site_config`. |
 | `containerapps` | Container `env_vars` (regex-scanned) + `secret_refs`. |
@@ -114,7 +114,7 @@ without opening a second terminal. Covered services include
 |---------|------------------------------------|
 | `iam` | Custom-role `policy_document`. Every service-account resource also gets its own `get_iam_policy` fetch: the resulting bindings are attached as `role_bindings` and summarised as an `impersonators` column (e.g. `tokenCreator(2)+user(1)`). Any principal holding `roles/iam.serviceAccountTokenCreator`, `roles/iam.serviceAccountUser`, `roles/iam.workloadIdentityUser`, `roles/iam.serviceAccountKeyAdmin`, `roles/iam.serviceAccountAdmin` or `roles/owner` on the SA is flagged because it represents an impersonation / privilege-escalation path. The project-level field `cis_fields.per_project[project].impersonable_service_accounts` counts at-risk SAs. |
 | `project` | Project `role_bindings` table. |
-| `storage` | GCS object secret scan (mirrors S3) + bucket `role_bindings`. |
+| `storage` | GCS object secret scan (mirrors S3) + bucket `role_bindings` + optional object downloads into `loot/<bucket>/...` when `--download` is enabled on `cse gcp enumerate --service storage`. |
 | `kms` | Key `role_bindings` + `key_versions` listing. |
 | `secretmanager` | Secret `versions` + `role_bindings`. |
 | `pubsub` | Topic `role_bindings`. |
@@ -164,10 +164,12 @@ for bucket-style scans.
   `--deep` against an entire account can multiply the call count
   by 10–50× depending on resource density.
 - Secret scanning of cloud storage (`s3` / `storage`) is the most
-  expensive code path because it actually downloads object bodies.
-  Both providers respect `s3_scan_file_limit` (default 100 objects
-  per bucket) and `s3_scan_size_limit_kb` (default 500 KB per
-  object). Use these when running across a large estate.
+  expensive code path because it downloads object bodies for regex
+  matching. Scan limits use `s3_scan_file_limit` (default 100 objects
+  per bucket) and `s3_scan_size_limit_kb` (default 500 KB per object).
+  Explicit download mode (`--download`) can pull larger sets into
+  `loot/`, so scope it with `--bucket` / `--account` / `--container`
+  and `--file` where possible.
 - Every deep call is wrapped in a defensive `try/except`; if the
   caller lacks the additional permission (e.g. `iam:GetPolicy`,
   `secretmanager.secrets.getIamPolicy`) the resource still appears

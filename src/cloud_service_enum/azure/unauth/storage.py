@@ -504,6 +504,36 @@ async def scan_public_blobs(
     return sampled, findings
 
 
+async def download_public_blobs(
+    client: httpx.AsyncClient,
+    account: str,
+    container: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    """Download public blobs and return metadata rows."""
+    downloaded: list[dict[str, Any]] = []
+    encoded_container = container.replace("$", "%24")
+    base = f"https://{account}.blob.core.windows.net/{encoded_container}"
+    for key in keys:
+        url = f"{base}/{key}"
+        try:
+            resp = await client.get(url)
+        except httpx.HTTPError:
+            continue
+        if resp.status_code != 200:
+            continue
+        downloaded.append(
+            {
+                "account": account,
+                "container": container,
+                "key": key,
+                "bytes": len(resp.content),
+                "content": resp.content,
+            }
+        )
+    return downloaded
+
+
 # ---------------------------------------------------------------------------
 # Bruteforce helpers
 # ---------------------------------------------------------------------------

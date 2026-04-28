@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import ServiceResult
 from cloud_service_enum.gcp.base import GcpService, missing_sdk
 
@@ -37,6 +38,7 @@ class StorageService(GcpService):
         retention_enabled = 0
         public = 0
         global_summary = ScanSummary(findings=[])
+        downloaded_count = 0
         for b in buckets:
             b.reload()
             ubl = bool(b.iam_configuration.uniform_bucket_level_access_enabled)
@@ -95,6 +97,15 @@ class StorageService(GcpService):
                     global_summary.bytes_scanned += bucket_summary.bytes_scanned
                     global_summary.findings.extend(bucket_summary.findings)
             result.resources.append(row)
+            if scope and scope.download:
+                downloaded = _download_bucket_objects(
+                    b,
+                    scope.download_buckets,
+                    scope.download_files,
+                    scope.download_all,
+                )
+                downloaded_count += len(downloaded)
+                result.resources.extend(downloaded)
         if focused and secret_scan:
             result.cis_fields["secret_scan"] = {
                 "files_found": global_summary.files_found,
@@ -108,6 +119,8 @@ class StorageService(GcpService):
             "buckets_with_retention": retention_enabled,
             "public_buckets": public,
         }
+        if scope and scope.download:
+            result.cis_fields.setdefault("per_project", {})[project_id]["objects_downloaded"] = downloaded_count
 
 
 def _scan_bucket_for_secrets(
@@ -139,3 +152,37 @@ def _scan_bucket_for_secrets(
         summary.bytes_scanned += len(data)
         summary.findings.extend(scan_text_fn(blob.name, text))
     return summary
+
+
+def _download_bucket_objects(
+    bucket: Any,
+    selected_buckets: list[str],
+    selected_files: list[str],
+    download_all: bool,
+) -> list[dict[str, Any]]:
+    if selected_buckets and bucket.name not in set(selected_buckets):
+        return []
+    file_filter = set(selected_files or [])
+    rows: list[dict[str, Any]] = []
+    try:
+        for blob in bucket.list_blobs():
+            name = blob.name
+            if not download_all and file_filter and name not in file_filter:
+                continue
+            if not download_all and not file_filter:
+                continue
+            destination = loot_destination(owner=bucket.name, key=name)
+            blob.download_to_filename(str(destination))
+            rows.append(
+                {
+                    "kind": "downloaded_object",
+                    "id": f"{bucket.name}/{name}",
+                    "name": name,
+                    "bucket": bucket.name,
+                    "bytes": blob.size,
+                    "loot_path": str(destination),
+                }
+            )
+    except Exception:  # noqa: BLE001
+        return rows
+    return rows

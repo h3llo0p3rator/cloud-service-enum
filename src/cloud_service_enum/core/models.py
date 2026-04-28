@@ -76,6 +76,12 @@ class Scope(BaseModel):
     lambda_code: bool = False
     lambda_code_size_limit_mb: int = 50
     lambda_code_file_size_limit_kb: int = 256
+    download: bool = False
+    download_all: bool = False
+    download_files: list[str] = Field(default_factory=list)
+    download_accounts: list[str] = Field(default_factory=list)
+    download_containers: list[str] = Field(default_factory=list)
+    download_buckets: list[str] = Field(default_factory=list)
 
 
 class ServiceResult(BaseModel):

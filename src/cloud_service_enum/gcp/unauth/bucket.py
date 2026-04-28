@@ -330,6 +330,32 @@ async def scan_public_objects(
     return sampled, findings
 
 
+async def download_public_objects(
+    client: httpx.AsyncClient,
+    bucket: str,
+    names: list[str],
+) -> list[dict[str, Any]]:
+    """Download public GCS objects and return metadata rows."""
+    downloaded: list[dict[str, Any]] = []
+    for name in names:
+        url = f"https://storage.googleapis.com/{bucket}/{name}"
+        try:
+            resp = await client.get(url)
+        except httpx.HTTPError:
+            continue
+        if resp.status_code != 200:
+            continue
+        downloaded.append(
+            {
+                "bucket": bucket,
+                "key": name,
+                "bytes": len(resp.content),
+                "content": resp.content,
+            }
+        )
+    return downloaded
+
+
 # ---------------------------------------------------------------------------
 # Bruteforce helpers
 # ---------------------------------------------------------------------------

@@ -185,6 +185,10 @@ for each file.
 | `--bruteforce-wordlist` | bundled | Suffix wordlist path. |
 | `--max-objects` | 100 | Max public objects sampled per bucket. |
 | `--max-object-size-kb` | 500 | Max bytes fetched per sampled object. |
+| `--download / --no-download` | off | Enable object downloads into `loot/<bucket>/...`. |
+| `--download-all` | off | Download all listed objects from each targeted bucket. |
+| `--file` | (none) | Specific object key(s) to download (repeatable). |
+| `--files` | (none) | Comma-separated object keys to download. |
 | Crawler knobs | `--max-pages 250 --max-concurrency 10 --timeout 15 --user-agent … --scope-host …` | Same as `cognito`. |
 
 At least one of `--url`, `--bucket`, or `--bruteforce` is required.
@@ -198,6 +202,8 @@ One `ServiceResult(service="unauth-s3")` with these resource kinds:
   `probes` summary, optional `secrets_found`.
 - `bucket_object` — emitted per sampled object. `bucket`, `key`,
   `size`, `bytes_scanned`, `secret_count`.
+- `downloaded_object` — emitted per downloaded object. Includes
+  `loot_path` under `loot/<bucket>/...`.
 - `crawl_summary` — when `--url` was supplied.
 - `bruteforce_summary` — when `--bruteforce` was supplied.
 
@@ -375,6 +381,10 @@ Every crawled body is scanned for Azure SAS query-string patterns
 | `--container-wordlist` | (none) | Required with `--bruteforce-container`. |
 | `--max-blobs` | 100 | Max public blobs sampled per container. |
 | `--max-blob-size-kb` | 500 | Max bytes fetched per sampled blob. |
+| `--download / --no-download` | off | Enable blob downloads into `loot/<container>/...`. |
+| `--download-all` | off | Download all listed blobs from each targeted container. |
+| `--file` | (none) | Specific blob key(s) to download (repeatable). |
+| `--files` | (none) | Comma-separated blob keys to download. |
 | Crawler knobs | same as AWS commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
 
 At least one of `--url`, `--account`, or `--bruteforce` is required.
@@ -392,6 +402,8 @@ kinds:
   `probes`, optional `secrets_found`.
 - `storage_blob` — per sampled blob: `account`, `container`, `key`,
   `size`, `bytes_scanned`, `secret_count`.
+- `downloaded_object` — per downloaded blob with `loot_path` under
+  `loot/<container>/...`.
 - `sas_token_summary` — every leaked SAS token (signatures redacted).
 - `crawl_summary` — when `--url` was supplied.
 - `bruteforce_summary` — when `--bruteforce` was supplied.
@@ -467,6 +479,10 @@ up under the bucket's `secrets_found` panel and as a dedicated
 | `--bruteforce-wordlist` | bundled | Suffix wordlist path. |
 | `--max-objects` | 100 | Max public objects sampled per bucket. |
 | `--max-object-size-kb` | 500 | Max bytes fetched per sampled object. |
+| `--download / --no-download` | off | Enable object downloads into `loot/<bucket>/...`. |
+| `--download-all` | off | Download all listed objects from each targeted bucket. |
+| `--file` | (none) | Specific object key(s) to download (repeatable). |
+| `--files` | (none) | Comma-separated object keys to download. |
 | Crawler knobs | same as AWS / Azure commands | `--max-pages`, `--max-concurrency`, `--timeout`, `--user-agent`, `--scope-host`. |
 
 At least one of `--url`, `--bucket`, or `--bruteforce` is required.
@@ -484,6 +500,8 @@ kinds:
   `secrets_found`.
 - `gcs_object` — per sampled object: `bucket`, `key`, `size`,
   `bytes_scanned`, `secret_count`.
+- `downloaded_object` — per downloaded object with `loot_path` under
+  `loot/<bucket>/...`.
 - `crawl_summary` — when `--url` was supplied.
 - `bruteforce_summary` — when `--bruteforce` was supplied.
 

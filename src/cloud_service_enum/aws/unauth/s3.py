@@ -297,6 +297,34 @@ async def scan_public_objects(
     return sampled, findings
 
 
+async def download_public_objects(
+    client: httpx.AsyncClient,
+    bucket: str,
+    region: str,
+    keys: list[str],
+) -> list[dict[str, Any]]:
+    """Download public objects and return metadata rows."""
+    downloaded: list[dict[str, Any]] = []
+    base = _endpoint(bucket, region)
+    for key in keys:
+        url = f"{base}/{key}"
+        try:
+            resp = await client.get(url)
+        except httpx.HTTPError:
+            continue
+        if resp.status_code != 200:
+            continue
+        downloaded.append(
+            {
+                "bucket": bucket,
+                "key": key,
+                "bytes": len(resp.content),
+                "content": resp.content,
+            }
+        )
+    return downloaded
+
+
 # ---------------------------------------------------------------------------
 # Bruteforce helper
 # ---------------------------------------------------------------------------

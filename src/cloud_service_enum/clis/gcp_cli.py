@@ -9,9 +9,11 @@ import click
 from cloud_service_enum.clis.common import (
     deep_scan_options,
     emit_reports,
+    normalize_download_selection,
     report_options,
     resolve_deep_flags,
     run_async,
+    split_csv,
     unauth_crawler_options,
 )
 from cloud_service_enum.core.models import Provider, Scope
@@ -39,6 +41,11 @@ def _auth_options(fn):  # type: ignore[no-untyped-def]
 @_auth_options
 @click.option("--projects", "projects", multiple=True, help="Project id(s) to scan (repeat or comma-sep).")
 @click.option("--service", "services", multiple=True, help="Restrict to given service(s).")
+@click.option("--download/--no-download", default=False, show_default=True, help="Enable storage object download mode.")
+@click.option("--download-all", is_flag=True, default=False, help="Download all objects from resolved bucket targets.")
+@click.option("--bucket", "download_buckets", multiple=True, help="Bucket target for download mode (repeatable).")
+@click.option("--file", "download_files", multiple=True, help="Specific object key to download (repeatable).")
+@click.option("--files", "download_files_csv", multiple=True, help="Comma-separated object keys to download.")
 @click.option("--max-concurrency", type=int, default=10, show_default=True)
 @click.option("--timeout", "timeout_s", type=float, default=180.0, show_default=True)
 @click.option("--no-progress", is_flag=True)
@@ -54,6 +61,11 @@ def gcp_enumerate(
     project_id: str | None,
     projects: tuple[str, ...],
     services: tuple[str, ...],
+    download: bool,
+    download_all: bool,
+    download_buckets: tuple[str, ...],
+    download_files: tuple[str, ...],
+    download_files_csv: tuple[str, ...],
     max_concurrency: int,
     timeout_s: float,
     no_progress: bool,
@@ -81,6 +93,16 @@ def gcp_enumerate(
         deep_scan=deep_scan,
         secret_scan=secret_scan,
     )
+    effective_download, effective_download_all, selected_files = normalize_download_selection(
+        download=download,
+        download_all=download_all,
+        files=download_files,
+        files_csv=download_files_csv,
+    )
+    if effective_download and service_list and "storage" not in service_list:
+        raise click.UsageError(
+            "Storage download flags require --service storage (or omit --service for full enumerate)."
+        )
     scope = Scope(
         provider=Provider.GCP,
         project_ids=_split(projects) or ([project_id] if project_id else []),
@@ -89,6 +111,10 @@ def gcp_enumerate(
         timeout_s=timeout_s,
         deep_scan=effective_deep,
         secret_scan=effective_secret,
+        download=effective_download,
+        download_all=effective_download_all,
+        download_files=list(selected_files),
+        download_buckets=list(split_csv(download_buckets)),
     )
     run = run_async(run_provider(Provider.GCP, auth, scope, show_progress=not no_progress))
     emit_reports(run, output_dir, report_formats)
@@ -142,6 +168,10 @@ def gcp_unauth() -> None:  # noqa: D401
 )
 @click.option("--max-objects", type=int, default=100, show_default=True)
 @click.option("--max-object-size-kb", type=int, default=500, show_default=True)
+@click.option("--download/--no-download", default=False, show_default=True, help="Enable object download mode.")
+@click.option("--download-all", is_flag=True, default=False, help="Download all objects from resolved public buckets.")
+@click.option("--file", "download_files", multiple=True, help="Specific object key to download (repeatable).")
+@click.option("--files", "download_files_csv", multiple=True, help="Comma-separated object keys to download.")
 @unauth_crawler_options
 @report_options
 def gcp_unauth_bucket(
@@ -152,6 +182,10 @@ def gcp_unauth_bucket(
     bruteforce_wordlist: Path | None,
     max_objects: int,
     max_object_size_kb: int,
+    download: bool,
+    download_all: bool,
+    download_files: tuple[str, ...],
+    download_files_csv: tuple[str, ...],
     max_pages: int,
     max_concurrency: int,
     timeout_s: float,
@@ -168,6 +202,12 @@ def gcp_unauth_bucket(
         raise click.UsageError(
             "--bruteforce requires at least one --bruteforce-prefix."
         )
+    effective_download, effective_download_all, selected_files = normalize_download_selection(
+        download=download,
+        download_all=download_all,
+        files=download_files,
+        files_csv=download_files_csv,
+    )
 
     from cloud_service_enum.gcp.unauth import BucketUnauthScope, run_bucket_unauth
 
@@ -179,6 +219,9 @@ def gcp_unauth_bucket(
         bruteforce_wordlist=bruteforce_wordlist,
         max_objects=max_objects,
         max_object_size_kb=max_object_size_kb,
+        download=effective_download,
+        download_all=effective_download_all,
+        download_files=selected_files,
         max_pages=max_pages,
         max_concurrency=max_concurrency,
         timeout_s=timeout_s,

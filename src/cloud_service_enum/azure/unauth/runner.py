@@ -26,6 +26,7 @@ from cloud_service_enum.azure.unauth.storage import (
     ContainerProbeReport,
     StorageProbeReport,
     bruteforce_accounts,
+    download_public_blobs,
     extract_accounts,
     extract_containers,
     extract_sas_tokens,
@@ -35,6 +36,7 @@ from cloud_service_enum.azure.unauth.storage import (
     scan_public_blobs,
 )
 from cloud_service_enum.core.display import render_service, render_summary
+from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import EnumerationRun, Provider, ServiceResult
 from cloud_service_enum.core.output import get_console
 from cloud_service_enum.core.unauth.common import (
@@ -68,6 +70,9 @@ class StorageUnauthScope:
     container_wordlist: Path | None = None
     max_blobs: int = 100
     max_blob_size_kb: int = 500
+    download: bool = False
+    download_all: bool = False
+    download_files: tuple[str, ...] = ()
     max_pages: int = SHARED_CRAWL_DEFAULTS["max_pages"]
     max_concurrency: int = SHARED_CRAWL_DEFAULTS["max_concurrency"]
     timeout_s: float = SHARED_CRAWL_DEFAULTS["timeout_s"]
@@ -132,6 +137,7 @@ async def run_storage_unauth(scope: StorageUnauthScope) -> EnumerationRun:
     account_reports: list[StorageProbeReport] = []
     container_reports: list[ContainerProbeReport] = []
     sampled_blobs: list[dict[str, Any]] = []
+    downloaded_blobs: list[dict[str, Any]] = []
     blob_secrets: list[dict[str, Any]] = []
     errors = crawl_errors(scope.target_url, pages)
 
@@ -213,6 +219,31 @@ async def run_storage_unauth(scope: StorageUnauthScope) -> EnumerationRun:
                     )
                     sampled_blobs.extend(sampled)
                     blob_secrets.extend(report_secrets)
+                    if scope.download:
+                        selected = _pick_download_keys(
+                            report.blob_keys,
+                            scope.download_all,
+                            scope.download_files,
+                        )
+                        for item in await download_public_blobs(
+                            client,
+                            report.account,
+                            report.container,
+                            selected,
+                        ):
+                            destination = loot_destination(
+                                owner=report.container, key=item["key"]
+                            )
+                            destination.write_bytes(item["content"])
+                            downloaded_blobs.append(
+                                {
+                                    "account": report.account,
+                                    "container": report.container,
+                                    "key": item["key"],
+                                    "bytes": item["bytes"],
+                                    "path": str(destination),
+                                }
+                            )
 
     resources = _build_resources(
         scope,
@@ -220,6 +251,7 @@ async def run_storage_unauth(scope: StorageUnauthScope) -> EnumerationRun:
         account_reports,
         container_reports,
         sampled_blobs,
+        downloaded_blobs,
         blob_secrets,
         pages,
         stats,
@@ -233,6 +265,7 @@ async def run_storage_unauth(scope: StorageUnauthScope) -> EnumerationRun:
         account_reports,
         container_reports,
         sampled_blobs,
+        downloaded_blobs,
         blob_secrets,
         secret_findings,
         sas_findings,
@@ -372,12 +405,26 @@ def _load_container_wordlist(scope: StorageUnauthScope) -> list[str]:
     return list(DEFAULT_CONTAINER_WORDLIST)
 
 
+def _pick_download_keys(
+    keys: list[str],
+    download_all: bool,
+    download_files: tuple[str, ...],
+) -> list[str]:
+    if download_all:
+        return list(keys)
+    if not download_files:
+        return []
+    wanted = set(download_files)
+    return [key for key in keys if key in wanted]
+
+
 def _build_resources(
     scope: StorageUnauthScope,
     account_targets: list[AccountHit],
     account_reports: list[StorageProbeReport],
     container_reports: list[ContainerProbeReport],
     sampled_blobs: list[dict[str, Any]],
+    downloaded_blobs: list[dict[str, Any]],
     blob_secrets: list[dict[str, Any]],
     pages: list[FetchedPage],
     stats: Any,
@@ -454,6 +501,18 @@ def _build_resources(
                 }
             )
         )
+    for blob in downloaded_blobs:
+        resources.append(
+            {
+                "kind": "downloaded_object",
+                "id": f"{blob['account']}/{blob['container']}/{blob['key']}",
+                "name": blob["key"],
+                "account": blob["account"],
+                "container": blob["container"],
+                "bytes": blob["bytes"],
+                "loot_path": blob["path"],
+            }
+        )
 
     if sas_findings:
         resources.append(
@@ -506,6 +565,7 @@ def _summarise(
     account_reports: list[StorageProbeReport],
     container_reports: list[ContainerProbeReport],
     sampled_blobs: list[dict[str, Any]],
+    downloaded_blobs: list[dict[str, Any]],
     blob_secrets: list[dict[str, Any]],
     crawl_secrets: list[dict[str, Any]],
     sas_findings: list[dict[str, Any]],
@@ -523,6 +583,7 @@ def _summarise(
         "containers_probed": len(container_reports),
         "public_containers": sum(1 for c in container_reports if c.public_list),
         "blobs_sampled": len(sampled_blobs),
+        "blobs_downloaded": len(downloaded_blobs),
         "blob_secrets": len(blob_secrets),
         "sas_tokens_leaked": len(sas_findings),
         "bundle_secrets": len(crawl_secrets),

@@ -52,12 +52,14 @@ from cloud_service_enum.aws.unauth.s3 import (
     BucketHit,
     BucketProbeReport,
     bruteforce_names,
+    download_public_objects,
     extract_buckets,
     load_default_suffix_wordlist,
     probe_bucket,
     scan_public_objects,
 )
 from cloud_service_enum.core.display import render_service, render_summary
+from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import EnumerationRun, Provider, ServiceResult
 from cloud_service_enum.core.output import get_console
 
@@ -417,6 +419,9 @@ class S3UnauthScope:
     bruteforce_wordlist: Path | None = None
     max_objects: int = 100
     max_object_size_kb: int = 500
+    download: bool = False
+    download_all: bool = False
+    download_files: tuple[str, ...] = ()
     max_pages: int = SHARED_CRAWL_DEFAULTS["max_pages"]
     max_concurrency: int = SHARED_CRAWL_DEFAULTS["max_concurrency"]
     timeout_s: float = SHARED_CRAWL_DEFAULTS["timeout_s"]
@@ -482,6 +487,7 @@ async def run_s3_unauth(scope: S3UnauthScope) -> EnumerationRun:
     svc_started = datetime.now(timezone.utc)
     reports: list[BucketProbeReport] = []
     sampled_objects: list[dict[str, Any]] = []
+    downloaded_objects: list[dict[str, Any]] = []
     bucket_secrets: list[dict[str, Any]] = []
     errors = crawl_errors(scope.target_url, pages)
 
@@ -508,12 +514,35 @@ async def run_s3_unauth(scope: S3UnauthScope) -> EnumerationRun:
                 )
                 sampled_objects.extend(sampled)
                 bucket_secrets.extend(report_secrets)
+                if scope.download:
+                    selected = _pick_download_keys(
+                        report.object_keys,
+                        scope.download_all,
+                        scope.download_files,
+                    )
+                    for item in await download_public_objects(
+                        client,
+                        report.bucket,
+                        report.region,
+                        selected,
+                    ):
+                        destination = loot_destination(owner=report.bucket, key=item["key"])
+                        destination.write_bytes(item["content"])
+                        downloaded_objects.append(
+                            {
+                                "bucket": report.bucket,
+                                "key": item["key"],
+                                "bytes": item["bytes"],
+                                "path": str(destination),
+                            }
+                        )
 
     resources = _build_s3_resources(
         scope,
         targets,
         reports,
         sampled_objects,
+        downloaded_objects,
         bucket_secrets,
         pages,
         stats,
@@ -525,6 +554,7 @@ async def run_s3_unauth(scope: S3UnauthScope) -> EnumerationRun:
         targets,
         reports,
         sampled_objects,
+        downloaded_objects,
         bucket_secrets,
         secret_findings,
         bruteforce_candidates,
@@ -571,11 +601,25 @@ def _merge_bucket_targets(
     return list(seen.values())
 
 
+def _pick_download_keys(
+    keys: list[str],
+    download_all: bool,
+    download_files: tuple[str, ...],
+) -> list[str]:
+    if download_all:
+        return list(keys)
+    if not download_files:
+        return []
+    wanted = set(download_files)
+    return [key for key in keys if key in wanted]
+
+
 def _build_s3_resources(
     scope: S3UnauthScope,
     targets: list[BucketHit],
     reports: list[BucketProbeReport],
     sampled_objects: list[dict[str, Any]],
+    downloaded_objects: list[dict[str, Any]],
     bucket_secrets: list[dict[str, Any]],
     pages: list[FetchedPage],
     stats: Any,
@@ -628,6 +672,17 @@ def _build_s3_resources(
                 }
             )
         )
+    for obj in downloaded_objects:
+        resources.append(
+            {
+                "kind": "downloaded_object",
+                "id": f"{obj['bucket']}/{obj['key']}",
+                "name": obj["key"],
+                "bucket": obj["bucket"],
+                "bytes": obj["bytes"],
+                "loot_path": obj["path"],
+            }
+        )
 
     summary = crawl_summary_row(
         scope.target_url or "",
@@ -659,6 +714,7 @@ def _summarise_s3(
     targets: list[BucketHit],
     reports: list[BucketProbeReport],
     sampled_objects: list[dict[str, Any]],
+    downloaded_objects: list[dict[str, Any]],
     bucket_secrets: list[dict[str, Any]],
     crawl_secrets: list[dict[str, Any]],
     bruteforce_candidates: list[str],
@@ -673,6 +729,7 @@ def _summarise_s3(
         "public_acl_buckets": sum(1 for r in reports if r.public_acl),
         "public_policy_buckets": sum(1 for r in reports if r.public_policy),
         "objects_sampled": len(sampled_objects),
+        "objects_downloaded": len(downloaded_objects),
         "bucket_object_secrets": len(bucket_secrets),
         "bundle_secrets": len(crawl_secrets),
         "bruteforce_candidates": len(bruteforce_candidates),
