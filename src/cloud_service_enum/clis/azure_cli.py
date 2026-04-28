@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import click
@@ -82,6 +83,7 @@ def _build_auth(**kw):  # type: ignore[no-untyped-def]
 @click.option("--download/--no-download", default=False, show_default=True, help="Enable storage object download mode.")
 @click.option("--download-all", is_flag=True, default=False, help="Download all objects from resolved storage targets.")
 @click.option("--account", "download_accounts", multiple=True, help="Storage account target for download mode (repeatable).")
+@click.option("--storage-account-key", "storage_account_key", default=None, help="Storage account key for authenticated storage download mode.")
 @click.option("--container", "download_containers", multiple=True, help="Storage container target for download mode (repeatable).")
 @click.option("--file", "download_files", multiple=True, help="Specific object key to download (repeatable).")
 @click.option("--files", "download_files_csv", multiple=True, help="Comma-separated object keys to download.")
@@ -127,6 +129,7 @@ def azure_enumerate(
     download: bool,
     download_all: bool,
     download_accounts: tuple[str, ...],
+    storage_account_key: str | None,
     download_containers: tuple[str, ...],
     download_files: tuple[str, ...],
     download_files_csv: tuple[str, ...],
@@ -140,6 +143,44 @@ def azure_enumerate(
     output_dir,  # type: ignore[no-untyped-def]
     report_formats: tuple[str, ...],
 ) -> None:
+    service_list = list(services)
+    effective_deep, effective_secret = resolve_deep_flags(
+        services=service_list,
+        deep_scan=deep_scan,
+        secret_scan=secret_scan,
+    )
+    effective_download, effective_download_all, selected_files = normalize_download_selection(
+        download=download,
+        download_all=download_all,
+        files=download_files,
+        files_csv=download_files_csv,
+    )
+    resolved_accounts = list(split_csv(download_accounts))
+    env_account = (os.getenv("AZURE_STORAGE_ACCOUNT") or "").strip()
+    env_key = (os.getenv("AZURE_STORAGE_KEY") or "").strip()
+    resolved_storage_account = (
+        resolved_accounts[0] if resolved_accounts else (env_account or None)
+    )
+    resolved_storage_key = storage_account_key or (env_key or None)
+    storage_key_source = "cli" if storage_account_key else ("env" if env_key else None)
+    if resolved_storage_key and len(resolved_accounts) > 1:
+        raise click.UsageError(
+            "Storage account key auth supports a single --account target."
+        )
+    if resolved_storage_key and not resolved_storage_account:
+        raise click.UsageError(
+            "Storage account key auth requires --account or AZURE_STORAGE_ACCOUNT."
+        )
+    if resolved_storage_key and service_list and "storage" not in service_list:
+        raise click.UsageError(
+            "Storage account key auth requires --service storage (or omit --service for full enumerate)."
+        )
+    if effective_download and service_list and "storage" not in service_list:
+        raise click.UsageError(
+            "Storage download flags require --service storage (or omit --service for full enumerate)."
+        )
+    if resolved_storage_account and not resolved_accounts:
+        resolved_accounts = [resolved_storage_account]
     auth = _build_auth(
         tenant_id=tenant_id,
         client_id=client_id,
@@ -155,23 +196,11 @@ def azure_enumerate(
         bearer_token=bearer_token,
         bearer_resource=bearer_resource,
         bearer_expires_on=bearer_expires_on,
+        extra={
+            "storage_account_name": resolved_storage_account,
+            "storage_account_key": resolved_storage_key,
+        },
     )
-    service_list = list(services)
-    effective_deep, effective_secret = resolve_deep_flags(
-        services=service_list,
-        deep_scan=deep_scan,
-        secret_scan=secret_scan,
-    )
-    effective_download, effective_download_all, selected_files = normalize_download_selection(
-        download=download,
-        download_all=download_all,
-        files=download_files,
-        files_csv=download_files_csv,
-    )
-    if effective_download and service_list and "storage" not in service_list:
-        raise click.UsageError(
-            "Storage download flags require --service storage (or omit --service for full enumerate)."
-        )
     scope = Scope(
         provider=Provider.AZURE,
         subscription_ids=[subscription_id] if subscription_id else [],
@@ -185,8 +214,10 @@ def azure_enumerate(
         download=effective_download,
         download_all=effective_download_all,
         download_files=list(selected_files),
-        download_accounts=list(split_csv(download_accounts)),
+        download_accounts=resolved_accounts,
         download_containers=list(split_csv(download_containers)),
+        storage_account_name=resolved_storage_account,
+        storage_account_key_source=storage_key_source,
     )
     run = run_async(run_provider(Provider.AZURE, auth, scope, show_progress=not no_progress))
     emit_reports(run, output_dir, report_formats)

@@ -228,6 +228,8 @@ export AZURE_TENANT_ID="..."
 export AZURE_CLIENT_ID="..."
 export AZURE_CLIENT_SECRET="..."         # or AZURE_CLIENT_CERTIFICATE_PATH
 export AZURE_SUBSCRIPTION_ID="..."        # optional, scoping
+export AZURE_STORAGE_ACCOUNT="..."        # optional, storage object download auth
+export AZURE_STORAGE_KEY="..."            # optional, storage object download auth
 ```
 
 ### GCP
@@ -448,6 +450,10 @@ cse azure enumerate \
 # Focus Azure Storage and download selected/all blobs
 cse azure enumerate --service storage --use-cli --account exampleaccount --container examplecontainer --download --file example.json --file example2.csv
 cse azure enumerate --service storage --use-cli --account exampleaccount --download --download-all
+
+# Storage account-key auth (CLI + env supported)
+cse azure enumerate --service storage --account exampleaccount --storage-account-key "$AZURE_STORAGE_KEY" --download --download-all
+AZURE_STORAGE_ACCOUNT=exampleaccount AZURE_STORAGE_KEY="$AZURE_STORAGE_KEY" cse azure enumerate --service storage --download --download-all
 
 # Microsoft Graph MFA status across every user
 cse azure mfa \

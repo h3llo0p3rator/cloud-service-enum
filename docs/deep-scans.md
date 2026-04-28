@@ -85,7 +85,7 @@ without opening a second terminal. Covered services include
 | Service | Extra fields fetched in deep mode |
 |---------|------------------------------------|
 | `automation` | New module. Runbook `script` + `script_language` (regex-scanned), `schedule` metadata, `credential` metadata, unencrypted `variable` values. |
-| `storage` | Account `keys` (masked into `env_vars`), `management_policy`, `private_endpoints`, optional blob downloads into `loot/<container>/...` when `--download` is enabled on `cse azure enumerate --service storage`. |
+| `storage` | Account `keys` (masked into `env_vars`), `management_policy`, `private_endpoints`, optional blob downloads into `loot/<container>/...` when `--download` is enabled on `cse azure enumerate --service storage`; download auth supports either ARM key lookup or direct account-key auth via `--storage-account-key` / `AZURE_STORAGE_KEY` (with account from `--account` or `AZURE_STORAGE_ACCOUNT`). |
 | `keyvault` | `access_policies` rendered as `role_bindings`. |
 | `appservice` | `application_settings` (regex-scanned), `connection_strings`, `auth_settings_v2`, detailed `site_config`. |
 | `containerapps` | Container `env_vars` (regex-scanned) + `secret_refs`. |

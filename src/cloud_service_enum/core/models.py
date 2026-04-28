@@ -82,6 +82,8 @@ class Scope(BaseModel):
     download_accounts: list[str] = Field(default_factory=list)
     download_containers: list[str] = Field(default_factory=list)
     download_buckets: list[str] = Field(default_factory=list)
+    storage_account_name: str | None = None
+    storage_account_key_source: str | None = None
 
 
 class ServiceResult(BaseModel):

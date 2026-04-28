@@ -34,30 +34,36 @@ class StorageService(AzureService):
                 except Exception:  # noqa: BLE001
                     pass
                 row = {
-                        "kind": "storage-account",
-                        "id": a.id,
-                        "name": a.name,
-                        "location": a.location,
-                        "subscription": subscription_id,
-                        "sku": a.sku.name if a.sku else None,
-                        "kind_class": a.kind,
-                        "https_only": a.enable_https_traffic_only,
-                        "min_tls_version": a.minimum_tls_version,
-                        "allow_blob_public_access": a.allow_blob_public_access,
-                        "allow_shared_key_access": a.allow_shared_key_access,
-                        "public_network_access": a.public_network_access,
-                        "encryption_key_source": a.encryption.key_source if a.encryption else None,
-                        "infrastructure_encryption": (
-                            a.encryption.require_infrastructure_encryption if a.encryption else None
-                        ),
-                        "blob_soft_delete": (
-                            (blob_props.delete_retention_policy.enabled if blob_props and blob_props.delete_retention_policy else None)
-                        ),
-                        "container_count": len(containers),
-                        "public_containers": sum(
-                            1 for c in containers if c.public_access and c.public_access != "None"
-                        ),
-                        "network_default_action": a.network_rule_set.default_action if a.network_rule_set else None,
+                    "kind": "storage-account",
+                    "id": a.id,
+                    "name": a.name,
+                    "location": a.location,
+                    "subscription": subscription_id,
+                    "sku": a.sku.name if a.sku else None,
+                    "kind_class": a.kind,
+                    "https_only": a.enable_https_traffic_only,
+                    "min_tls_version": a.minimum_tls_version,
+                    "allow_blob_public_access": a.allow_blob_public_access,
+                    "allow_shared_key_access": a.allow_shared_key_access,
+                    "public_network_access": a.public_network_access,
+                    "encryption_key_source": a.encryption.key_source if a.encryption else None,
+                    "infrastructure_encryption": (
+                        a.encryption.require_infrastructure_encryption if a.encryption else None
+                    ),
+                    "blob_soft_delete": (
+                        (
+                            blob_props.delete_retention_policy.enabled
+                            if blob_props and blob_props.delete_retention_policy
+                            else None
+                        )
+                    ),
+                    "container_count": len(containers),
+                    "public_containers": sum(
+                        1 for c in containers if c.public_access and c.public_access != "None"
+                    ),
+                    "network_default_action": (
+                        a.network_rule_set.default_action if a.network_rule_set else None
+                    ),
                 }
                 attach_identity(row, a)
                 if focused:
@@ -66,6 +72,7 @@ class StorageService(AzureService):
                 if self.scope and self.scope.download:
                     try:
                         downloaded = await self._download_blobs_for_account(
+                            auth,
                             client,
                             rg,
                             a.name,
@@ -84,7 +91,9 @@ class StorageService(AzureService):
             "accounts_allowing_public_blob": sum(1 for r in enriched if r.get("allow_blob_public_access")),
         }
         if self.scope and self.scope.download:
-            result.cis_fields.setdefault("per_subscription", {})[subscription_id]["objects_downloaded"] = downloaded_count
+            result.cis_fields.setdefault("per_subscription", {})[subscription_id][
+                "objects_downloaded"
+            ] = downloaded_count
 
     @staticmethod
     async def _enrich(client: StorageManagementClient, rg: str, a, row: dict) -> None:
@@ -99,9 +108,37 @@ class StorageService(AzureService):
                 }
         except Exception:  # noqa: BLE001
             pass
+        try:
+            policy = await client.management_policies.get(rg, a.name, "default")
+            if policy and policy.policy:
+                body = policy.policy
+                row["policy_document"] = (
+                    body.serialize() if hasattr(body, "serialize") else dict(body)
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            pec = await iter_async(
+                client.private_endpoint_connections.list(rg, a.name)
+            )
+            row["private_endpoints"] = [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "state": (
+                        p.private_link_service_connection_state.status
+                        if p.private_link_service_connection_state
+                        else None
+                    ),
+                }
+                for p in pec or []
+            ]
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _download_blobs_for_account(
         self,
+        auth: AzureAuthenticator,
         client: StorageManagementClient,
         resource_group: str,
         account_name: str,
@@ -117,10 +154,12 @@ class StorageService(AzureService):
         scope = self.scope
         if scope and scope.download_accounts and account_name not in set(scope.download_accounts):
             return []
-        keys = await client.storage_accounts.list_keys(resource_group, account_name)
-        if not keys or not keys.keys:
-            return []
-        key = keys.keys[0].value
+        key = self._resolve_storage_key(auth, account_name)
+        if not key:
+            keys = await client.storage_accounts.list_keys(resource_group, account_name)
+            if not keys or not keys.keys:
+                return []
+            key = keys.keys[0].value
         if not key:
             return []
         svc = BlobServiceClient(
@@ -160,30 +199,12 @@ class StorageService(AzureService):
                     }
                 )
         return rows
-        try:
-            policy = await client.management_policies.get(rg, a.name, "default")
-            if policy and policy.policy:
-                body = policy.policy
-                row["policy_document"] = (
-                    body.serialize() if hasattr(body, "serialize") else dict(body)
-                )
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            pec = await iter_async(
-                client.private_endpoint_connections.list(rg, a.name)
-            )
-            row["private_endpoints"] = [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "state": (
-                        p.private_link_service_connection_state.status
-                        if p.private_link_service_connection_state
-                        else None
-                    ),
-                }
-                for p in pec or []
-            ]
-        except Exception:  # noqa: BLE001
-            pass
+
+    @staticmethod
+    def _resolve_storage_key(auth: AzureAuthenticator, account_name: str) -> str | None:
+        extra = auth.config.extra or {}
+        configured_account = str(extra.get("storage_account_name") or "").strip().lower()
+        configured_key = str(extra.get("storage_account_key") or "").strip()
+        if configured_account and configured_key and configured_account == account_name.lower():
+            return configured_key
+        return None
