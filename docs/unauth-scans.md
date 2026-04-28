@@ -356,7 +356,7 @@ metadata, or a public access level other than `none`) are rendered.
 
 For every container with a public listing, text-like blobs (`.txt`,
 `.json`, `.env`, `.yaml`, `.ini`, `.sql`, …) are sampled with a capped
-`Range` request (`--max-blob-size-kb`, default 500 KB) and run through
+`Range` request (`--azure-scan-size-limit-kb`, default 500 KB) and run through
 `core.secrets.scan_text`. Matches show up under the container's
 `secrets_found` panel and as a dedicated `storage_blob` resource for
 each file.
@@ -381,6 +381,8 @@ Every crawled body is scanned for Azure SAS query-string patterns
 | `--container-wordlist` | (none) | Required with `--bruteforce-container`. |
 | `--max-blobs` | 100 | Max public blobs sampled per container. |
 | `--max-blob-size-kb` | 500 | Max bytes fetched per sampled blob. |
+| `--azure-scan-file-limit` | (none) | Azure-named alias for `--max-blobs`. |
+| `--azure-scan-size-limit-kb` | (none) | Azure-named alias for `--max-blob-size-kb`. |
 | `--download / --no-download` | off | Enable blob downloads into `loot/<container>/...`. |
 | `--download-all` | off | Download all listed blobs from each targeted container. |
 | `--file` | (none) | Specific blob key(s) to download (repeatable). |

@@ -8,6 +8,12 @@ from cloud_service_enum.azure.auth import AzureAuthenticator
 from cloud_service_enum.azure.base import AzureService, attach_identity, iter_async
 from cloud_service_enum.core.loot import loot_destination
 from cloud_service_enum.core.models import ServiceResult
+from cloud_service_enum.core.secrets import (
+    TEXT_EXTENSIONS,
+    ScanSummary,
+    ext,
+    scan_text,
+)
 
 
 class StorageService(AzureService):
@@ -24,6 +30,7 @@ class StorageService(AzureService):
                 accounts = []
             enriched: list[dict] = []
             downloaded_count = 0
+            secret_summary = ScanSummary()
             processed_accounts: set[str] = set()
             for a in accounts:
                 processed_accounts.add((a.name or "").lower())
@@ -84,11 +91,24 @@ class StorageService(AzureService):
                             self.scope.download_containers,
                             self.scope.download_files,
                             self.scope.download_all,
+                            scan_summary=secret_summary if self.scope.secret_scan else None,
                         )
                     except Exception:  # noqa: BLE001
                         downloaded = []
                     downloaded_count += len(downloaded)
                     result.resources.extend(downloaded)
+                if self.scope and self.scope.secret_scan:
+                    secret_rows = await self._scan_account_blobs_for_secrets(
+                        auth,
+                        client,
+                        rg,
+                        a.name,
+                        scan_summary=secret_summary,
+                        file_limit=self.scope.azure_scan_file_limit,
+                        size_limit_kb=self.scope.azure_scan_size_limit_kb,
+                    )
+                    if secret_rows:
+                        row["secrets_found"] = secret_rows
             if self.scope and self.scope.download:
                 fallback_account = self._resolve_storage_account_name(auth)
                 fallback_key = (
@@ -107,6 +127,7 @@ class StorageService(AzureService):
                         selected_containers=self.scope.download_containers,
                         selected_files=self.scope.download_files,
                         download_all=self.scope.download_all,
+                        scan_summary=secret_summary if self.scope.secret_scan else None,
                     )
                     if downloaded:
                         result.resources.append(
@@ -131,6 +152,10 @@ class StorageService(AzureService):
             result.cis_fields.setdefault("per_subscription", {})[subscription_id][
                 "objects_downloaded"
             ] = downloaded_count
+        if self.scope and self.scope.secret_scan:
+            result.cis_fields.setdefault("per_subscription", {})[subscription_id][
+                "secret_scan"
+            ] = secret_summary.as_dict()
 
     @staticmethod
     async def _enrich(client: StorageManagementClient, rg: str, a, row: dict) -> None:
@@ -182,6 +207,7 @@ class StorageService(AzureService):
         selected_containers: list[str],
         selected_files: list[str],
         download_all: bool,
+        scan_summary: ScanSummary | None = None,
     ) -> list[dict]:
         try:
             from azure.storage.blob import BlobServiceClient
@@ -205,6 +231,7 @@ class StorageService(AzureService):
             selected_containers=selected_containers,
             selected_files=selected_files,
             download_all=download_all,
+            scan_summary=scan_summary,
         )
 
     @staticmethod
@@ -230,6 +257,7 @@ class StorageService(AzureService):
         selected_containers: list[str],
         selected_files: list[str],
         download_all: bool,
+        scan_summary: ScanSummary | None = None,
     ) -> list[dict]:
         from azure.storage.blob import BlobServiceClient
 
@@ -241,14 +269,22 @@ class StorageService(AzureService):
         container_filter = set(selected_containers or [])
         file_filter = set(selected_files or [])
         for container in svc.list_containers():
-            container_name = container.get("name")
+            container_name = (
+                container.get("name")
+                if isinstance(container, dict)
+                else getattr(container, "name", None)
+            )
             if not container_name:
                 continue
             if container_filter and container_name not in container_filter:
                 continue
             cclient = svc.get_container_client(container_name)
             for blob in cclient.list_blobs():
-                blob_name = blob.get("name")
+                blob_name = (
+                    blob.get("name")
+                    if isinstance(blob, dict)
+                    else getattr(blob, "name", None)
+                )
                 if not blob_name:
                     continue
                 if not download_all and file_filter and blob_name not in file_filter:
@@ -258,6 +294,23 @@ class StorageService(AzureService):
                 data = cclient.get_blob_client(blob_name).download_blob().readall()
                 destination = loot_destination(owner=container_name, key=blob_name)
                 destination.write_bytes(data)
+                secret_count = 0
+                if scan_summary is not None and ext(blob_name) in TEXT_EXTENSIONS:
+                    scan_summary.files_found += 1
+                    scan_summary.files_scanned += 1
+                    scan_summary.findings.extend(
+                        scan_text(
+                            f"azure://{account_name}/{container_name}/{blob_name}",
+                            data.decode("utf-8", errors="replace"),
+                        )
+                    )
+                    secret_count = len(
+                        [
+                            f
+                            for f in scan_summary.findings
+                            if f.file == f"azure://{account_name}/{container_name}/{blob_name}"
+                        ]
+                    )
                 rows.append(
                     {
                         "kind": "downloaded_object",
@@ -266,7 +319,83 @@ class StorageService(AzureService):
                         "account": account_name,
                         "container": container_name,
                         "bytes": len(data),
+                        "secret_count": secret_count or None,
                         "loot_path": str(destination),
                     }
                 )
         return rows
+
+    async def _scan_account_blobs_for_secrets(
+        self,
+        auth: AzureAuthenticator,
+        client: StorageManagementClient,
+        resource_group: str,
+        account_name: str,
+        *,
+        scan_summary: ScanSummary,
+        file_limit: int,
+        size_limit_kb: int,
+    ) -> list[dict]:
+        if self.scope and self.scope.download:
+            return []
+        try:
+            from azure.storage.blob import BlobServiceClient
+        except ImportError:
+            return []
+        key = self._resolve_storage_key(auth, account_name)
+        if not key:
+            keys = await client.storage_accounts.list_keys(resource_group, account_name)
+            if not keys or not keys.keys:
+                return []
+            key = keys.keys[0].value
+        if not key:
+            return []
+        svc = BlobServiceClient(
+            account_url=f"https://{account_name}.blob.core.windows.net",
+            credential=key,
+        )
+        findings: list[dict] = []
+        scanned = 0
+        max_bytes = max(1, size_limit_kb) * 1024
+        for container in svc.list_containers():
+            container_name = (
+                container.get("name")
+                if isinstance(container, dict)
+                else getattr(container, "name", None)
+            )
+            if not container_name:
+                continue
+            cclient = svc.get_container_client(container_name)
+            for blob in cclient.list_blobs():
+                if scanned >= max(1, file_limit):
+                    return findings
+                blob_name = (
+                    blob.get("name")
+                    if isinstance(blob, dict)
+                    else getattr(blob, "name", None)
+                )
+                if not blob_name:
+                    continue
+                scan_summary.files_found += 1
+                if ext(blob_name) not in TEXT_EXTENSIONS:
+                    scan_summary.files_skipped_type += 1
+                    continue
+                blob_size = (
+                    blob.get("size")
+                    if isinstance(blob, dict)
+                    else getattr(blob, "size", None)
+                )
+                if blob_size and blob_size > max_bytes:
+                    scan_summary.files_skipped_size += 1
+                    continue
+                data = cclient.get_blob_client(blob_name).download_blob().readall()
+                body = data[:max_bytes].decode("utf-8", errors="replace")
+                scanned += 1
+                scan_summary.files_scanned += 1
+                hits = scan_text(
+                    f"azure://{account_name}/{container_name}/{blob_name}", body
+                )
+                hit_rows = [hit.as_dict() for hit in hits]
+                findings.extend(hit_rows)
+                scan_summary.findings.extend(hits)
+        return findings

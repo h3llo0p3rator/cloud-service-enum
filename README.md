@@ -414,6 +414,11 @@ cse azure unauth storage --bruteforce \
 cse azure unauth storage --account exampleaccount --container data --download --files a.json,b.csv
 cse azure unauth storage --account exampleaccount --download --download-all
 
+# Azure unauth: tune public blob secret-scan limits
+cse azure unauth storage --url https://app.example.com \
+  --azure-scan-file-limit 150 \
+  --azure-scan-size-limit-kb 768
+
 # Azure: discover *.azurewebsites.net hosts + probe canonical leak
 # paths (Kudu anonymous access, /.git/HEAD, /.env, …).
 cse azure unauth appservice --url https://portal.example.com
@@ -450,6 +455,11 @@ cse azure enumerate \
 # Focus Azure Storage and download selected/all blobs
 cse azure enumerate --service storage --use-cli --account exampleaccount --container examplecontainer --download --file example.json --file example2.csv
 cse azure enumerate --service storage --use-cli --account exampleaccount --download --download-all
+
+# Azure storage: tune authenticated blob secret-scan limits
+cse azure enumerate --service storage --secret-scan \
+  --azure-scan-file-limit 200 \
+  --azure-scan-size-limit-kb 1024
 
 # Storage account-key auth (CLI + env supported)
 cse azure enumerate --service storage --account exampleaccount --storage-account-key "$AZURE_STORAGE_KEY" --download --download-all

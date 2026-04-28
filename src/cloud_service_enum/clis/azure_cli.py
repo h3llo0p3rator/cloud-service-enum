@@ -87,6 +87,8 @@ def _build_auth(**kw):  # type: ignore[no-untyped-def]
 @click.option("--container", "download_containers", multiple=True, help="Storage container target for download mode (repeatable).")
 @click.option("--file", "download_files", multiple=True, help="Specific object key to download (repeatable).")
 @click.option("--files", "download_files_csv", multiple=True, help="Comma-separated object keys to download.")
+@click.option("--azure-scan-file-limit", type=int, default=100, show_default=True, help="Maximum blobs scanned for secrets per storage account.")
+@click.option("--azure-scan-size-limit-kb", type=int, default=500, show_default=True, help="Maximum blob size (KB) scanned per blob.")
 @click.option("--max-concurrency", type=int, default=10, show_default=True)
 @click.option("--timeout", "timeout_s", type=float, default=120.0, show_default=True)
 @click.option("--no-progress", is_flag=True, help="Disable the Rich progress bar.")
@@ -133,6 +135,8 @@ def azure_enumerate(
     download_containers: tuple[str, ...],
     download_files: tuple[str, ...],
     download_files_csv: tuple[str, ...],
+    azure_scan_file_limit: int,
+    azure_scan_size_limit_kb: int,
     max_concurrency: int,
     timeout_s: float,
     no_progress: bool,
@@ -216,6 +220,8 @@ def azure_enumerate(
         download_files=list(selected_files),
         download_accounts=resolved_accounts,
         download_containers=list(split_csv(download_containers)),
+        azure_scan_file_limit=azure_scan_file_limit,
+        azure_scan_size_limit_kb=azure_scan_size_limit_kb,
         storage_account_name=resolved_storage_account,
         storage_account_key_source=storage_key_source,
     )
@@ -404,6 +410,8 @@ def azure_unauth() -> None:  # noqa: D401
 )
 @click.option("--max-blobs", type=int, default=100, show_default=True)
 @click.option("--max-blob-size-kb", type=int, default=500, show_default=True)
+@click.option("--azure-scan-file-limit", type=int, default=None, help="Alias for --max-blobs.")
+@click.option("--azure-scan-size-limit-kb", type=int, default=None, help="Alias for --max-blob-size-kb.")
 @click.option("--download/--no-download", default=False, show_default=True, help="Enable blob download mode.")
 @click.option("--download-all", is_flag=True, default=False, help="Download all blobs from resolved containers.")
 @click.option("--file", "download_files", multiple=True, help="Specific blob key to download (repeatable).")
@@ -421,6 +429,8 @@ def azure_unauth_storage(
     container_wordlist: Path | None,
     max_blobs: int,
     max_blob_size_kb: int,
+    azure_scan_file_limit: int | None,
+    azure_scan_size_limit_kb: int | None,
     download: bool,
     download_all: bool,
     download_files: tuple[str, ...],
@@ -451,6 +461,8 @@ def azure_unauth_storage(
         files=download_files,
         files_csv=download_files_csv,
     )
+    effective_max_blobs = azure_scan_file_limit or max_blobs
+    effective_max_blob_size_kb = azure_scan_size_limit_kb or max_blob_size_kb
 
     from cloud_service_enum.azure.unauth import StorageUnauthScope, run_storage_unauth
 
@@ -463,8 +475,8 @@ def azure_unauth_storage(
         bruteforce_wordlist=bruteforce_wordlist,
         bruteforce_container=bruteforce_container,
         container_wordlist=container_wordlist,
-        max_blobs=max_blobs,
-        max_blob_size_kb=max_blob_size_kb,
+        max_blobs=effective_max_blobs,
+        max_blob_size_kb=effective_max_blob_size_kb,
         download=effective_download,
         download_all=effective_download_all,
         download_files=selected_files,

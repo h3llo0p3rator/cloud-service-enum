@@ -82,6 +82,8 @@ class Scope(BaseModel):
     download_accounts: list[str] = Field(default_factory=list)
     download_containers: list[str] = Field(default_factory=list)
     download_buckets: list[str] = Field(default_factory=list)
+    azure_scan_file_limit: int = 100
+    azure_scan_size_limit_kb: int = 500
     storage_account_name: str | None = None
     storage_account_key_source: str | None = None
 
