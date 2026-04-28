@@ -165,17 +165,25 @@ def azure_enumerate(
     resolved_storage_account = (
         resolved_accounts[0] if resolved_accounts else (env_account or None)
     )
-    resolved_storage_key = storage_account_key or (env_key or None)
-    storage_key_source = "cli" if storage_account_key else ("env" if env_key else None)
-    if resolved_storage_key and len(resolved_accounts) > 1:
+    # Storage account key auth is only relevant for storage download flows.
+    # Avoid breaking unrelated service enumerations when AZURE_STORAGE_KEY is
+    # present in the shell environment.
+    resolved_storage_key = (
+        storage_account_key
+        or (env_key or None if effective_download else None)
+    )
+    storage_key_source = "cli" if storage_account_key else (
+        "env" if (env_key and effective_download) else None
+    )
+    if effective_download and resolved_storage_key and len(resolved_accounts) > 1:
         raise click.UsageError(
             "Storage account key auth supports a single --account target."
         )
-    if resolved_storage_key and not resolved_storage_account:
+    if effective_download and resolved_storage_key and not resolved_storage_account:
         raise click.UsageError(
             "Storage account key auth requires --account or AZURE_STORAGE_ACCOUNT."
         )
-    if resolved_storage_key and service_list and "storage" not in service_list:
+    if effective_download and resolved_storage_key and service_list and "storage" not in service_list:
         raise click.UsageError(
             "Storage account key auth requires --service storage (or omit --service for full enumerate)."
         )
@@ -183,7 +191,7 @@ def azure_enumerate(
         raise click.UsageError(
             "Storage download flags require --service storage (or omit --service for full enumerate)."
         )
-    if resolved_storage_account and not resolved_accounts:
+    if effective_download and resolved_storage_account and not resolved_accounts:
         resolved_accounts = [resolved_storage_account]
     auth = _build_auth(
         tenant_id=tenant_id,
