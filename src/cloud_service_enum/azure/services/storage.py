@@ -18,10 +18,15 @@ class StorageService(AzureService):
     ) -> None:
         focused = self.is_focused_on()
         async with StorageManagementClient(auth.credential(), subscription_id) as client:
-            accounts = await iter_async(client.storage_accounts.list())
+            try:
+                accounts = await iter_async(client.storage_accounts.list())
+            except Exception:  # noqa: BLE001
+                accounts = []
             enriched: list[dict] = []
             downloaded_count = 0
+            processed_accounts: set[str] = set()
             for a in accounts:
+                processed_accounts.add((a.name or "").lower())
                 rg = a.id.split("/")[4]
                 blob_props = None
                 try:
@@ -82,6 +87,38 @@ class StorageService(AzureService):
                         )
                     except Exception:  # noqa: BLE001
                         downloaded = []
+                    downloaded_count += len(downloaded)
+                    result.resources.extend(downloaded)
+            if self.scope and self.scope.download:
+                fallback_account = self._resolve_storage_account_name(auth)
+                fallback_key = (
+                    self._resolve_storage_key(auth, fallback_account)
+                    if fallback_account
+                    else None
+                )
+                if (
+                    fallback_account
+                    and fallback_key
+                    and fallback_account.lower() not in processed_accounts
+                ):
+                    downloaded = self._download_blobs_with_key(
+                        account_name=fallback_account,
+                        key=fallback_key,
+                        selected_containers=self.scope.download_containers,
+                        selected_files=self.scope.download_files,
+                        download_all=self.scope.download_all,
+                    )
+                    if downloaded:
+                        result.resources.append(
+                            {
+                                "kind": "storage-account",
+                                "id": f"(storage-key-auth)/{fallback_account}",
+                                "name": fallback_account,
+                                "subscription": subscription_id,
+                                "auth_mode": "storage-account-key",
+                                "arm_visible": "no",
+                            }
+                        )
                     downloaded_count += len(downloaded)
                     result.resources.extend(downloaded)
         result.resources.extend(enriched)
@@ -162,6 +199,40 @@ class StorageService(AzureService):
             key = keys.keys[0].value
         if not key:
             return []
+        return self._download_blobs_with_key(
+            account_name=account_name,
+            key=key,
+            selected_containers=selected_containers,
+            selected_files=selected_files,
+            download_all=download_all,
+        )
+
+    @staticmethod
+    def _resolve_storage_key(auth: AzureAuthenticator, account_name: str) -> str | None:
+        extra = auth.config.extra or {}
+        configured_account = str(extra.get("storage_account_name") or "").strip().lower()
+        configured_key = str(extra.get("storage_account_key") or "").strip()
+        if configured_account and configured_key and configured_account == account_name.lower():
+            return configured_key
+        return None
+
+    @staticmethod
+    def _resolve_storage_account_name(auth: AzureAuthenticator) -> str | None:
+        extra = auth.config.extra or {}
+        account_name = str(extra.get("storage_account_name") or "").strip()
+        return account_name or None
+
+    @staticmethod
+    def _download_blobs_with_key(
+        *,
+        account_name: str,
+        key: str,
+        selected_containers: list[str],
+        selected_files: list[str],
+        download_all: bool,
+    ) -> list[dict]:
+        from azure.storage.blob import BlobServiceClient
+
         svc = BlobServiceClient(
             account_url=f"https://{account_name}.blob.core.windows.net",
             credential=key,
@@ -199,12 +270,3 @@ class StorageService(AzureService):
                     }
                 )
         return rows
-
-    @staticmethod
-    def _resolve_storage_key(auth: AzureAuthenticator, account_name: str) -> str | None:
-        extra = auth.config.extra or {}
-        configured_account = str(extra.get("storage_account_name") or "").strip().lower()
-        configured_key = str(extra.get("storage_account_key") or "").strip()
-        if configured_account and configured_key and configured_account == account_name.lower():
-            return configured_key
-        return None
