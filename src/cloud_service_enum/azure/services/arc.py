@@ -136,6 +136,12 @@ async def _collect_run_commands(
     subscription_id: str,
     result: ServiceResult,
 ) -> None:
+    if not hasattr(client, "machine_run_commands"):
+        result.errors.append(
+            "arc-run-commands unsupported by installed azure-mgmt-hybridcompute "
+            "(missing machine_run_commands client); skipping run-command metadata"
+        )
+        return
     try:
         commands = await iter_async(
             client.machine_run_commands.list(rg, machine_name)
