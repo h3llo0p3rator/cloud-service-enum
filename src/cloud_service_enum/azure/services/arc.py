@@ -34,6 +34,7 @@ class ArcService(AzureService):
         async with HybridComputeManagementClient(
             auth.credential(), subscription_id
         ) as client:
+            supports_run_commands = hasattr(client, "machine_run_commands")
             machines = await iter_async(client.machines.list_by_subscription())
             for machine in machines:
                 rg = (machine.id or "").split("/")[4] if machine.id else None
@@ -45,7 +46,7 @@ class ArcService(AzureService):
                 await _collect_extensions(
                     client, rg, machine.name, subscription_id, result
                 )
-                if focused:
+                if focused and supports_run_commands:
                     await _collect_run_commands(
                         client, rg, machine.name, subscription_id, result
                     )
@@ -55,6 +56,7 @@ class ArcService(AzureService):
             "disconnected": sum(
                 1 for m in machines if (getattr(m, "status", "") or "").lower() != "connected"
             ),
+            "run_command_metadata_supported": supports_run_commands,
         }
 
 
@@ -136,12 +138,6 @@ async def _collect_run_commands(
     subscription_id: str,
     result: ServiceResult,
 ) -> None:
-    if not hasattr(client, "machine_run_commands"):
-        result.errors.append(
-            "arc-run-commands unsupported by installed azure-mgmt-hybridcompute "
-            "(missing machine_run_commands client); skipping run-command metadata"
-        )
-        return
     try:
         commands = await iter_async(
             client.machine_run_commands.list(rg, machine_name)
