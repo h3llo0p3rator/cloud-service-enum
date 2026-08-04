@@ -49,16 +49,20 @@ class GcrService(GcpService):
                 for path, payload in entries:
                     uri = f"{host}/{path}"
                     tags = list(payload.get("tags") or [])
-                    # tags/list is already fetched during discovery — always surface tags.
+                    short = (
+                        path[len(project_id) + 1 :]
+                        if path.startswith(f"{project_id}/")
+                        else path
+                    )
                     row: dict[str, Any] = {
                         "kind": "gcr-image",
                         "id": uri,
-                        "name": path,
+                        "name": short,
+                        "tag": ", ".join(tags) if tags else None,
+                        "tags": tags,
                         "project": project_id,
                         "host": host,
                         "uri": uri,
-                        "tags": tags,
-                        "tag_count": len(tags),
                     }
                     if focused:
                         images = _images_from_manifest(payload.get("manifest") or {})
@@ -119,7 +123,7 @@ def _discover(
         data = _tags_list(client, host, path)
         if data is None:
             continue
-        if path != project_id:
+        if path != project_id and _is_image(data):
             found.append((path, data))
         for child in data.get("child") or []:
             if isinstance(child, str) and child:
@@ -133,8 +137,14 @@ def _discover(
         if len(found) >= _MAX_REPOS:
             break
         data = _tags_list(client, host, name) or {}
-        found.append((name, data))
+        if _is_image(data):
+            found.append((name, data))
     return found
+
+
+def _is_image(data: dict[str, Any]) -> bool:
+    """True when the path has tags or digests (skip empty directory nodes)."""
+    return bool(data.get("tags") or data.get("manifest"))
 
 
 def _catalog(client: httpx.Client, host: str, project_id: str) -> list[str]:

@@ -42,6 +42,10 @@ _PREFERRED_COLUMNS: tuple[str, ...] = (
     "iam_role",
     "principal_type",
 )
+# Per-kind column overrides when the default id/name-first layout is noisy.
+_KIND_COLUMNS: dict[str, tuple[str, ...]] = {
+    "gcr-image": ("kind", "name", "tag", "host"),
+}
 # Fields that are always in the JSON report but add little in a terminal table.
 _NOISY_FIELDS: frozenset[str] = frozenset(
     {"created", "last_used", "finished_at", "started_at", "max_session_duration"}
@@ -75,6 +79,8 @@ _DETAIL_ONLY_FIELDS: frozenset[str] = frozenset(
         "shared_with",
         "event_sources",
         "extensions",
+        "tags",
+        "images",
     }
 )
 _MAX_EXTRA_COLUMNS = 4
@@ -733,12 +739,21 @@ def _pick_columns(resources: list[dict[str, Any]]) -> list[str]:
     """Choose preferred columns plus a few short scalar extras.
 
     Rules:
+      - Prefer a kind-specific column set when every row shares one kind.
       - Always include preferred fields (kind/id/arn/name/region) that appear.
       - Skip dict/list values — they wrap terribly in a terminal; they go in
         the JSON report and in per-row detail panels instead.
       - Skip known-noisy timestamp fields (`created`, `last_used`, etc.).
       - Cap extras at :data:`_MAX_EXTRA_COLUMNS`.
     """
+    kinds = {row.get("kind") for row in resources}
+    if len(kinds) == 1:
+        kind_cols = _KIND_COLUMNS.get(next(iter(kinds)) or "")
+        if kind_cols:
+            cols = [c for c in kind_cols if any(c in row for row in resources)]
+            if cols:
+                return cols
+
     cols: list[str] = []
     seen: set[str] = set()
     for col in _PREFERRED_COLUMNS:
