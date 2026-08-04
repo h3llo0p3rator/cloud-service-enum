@@ -5,6 +5,7 @@ from __future__ import annotations
 from cloud_service_enum.core.models import Provider
 from cloud_service_enum.core.registry import registry
 
+from cloud_service_enum.gcp.services.appengine import AppEngineService
 from cloud_service_enum.gcp.services.artifactregistry import ArtifactRegistryService
 from cloud_service_enum.gcp.services.bigquery import BigQueryService
 from cloud_service_enum.gcp.services.binaryauthorization import BinaryAuthorizationService
@@ -33,6 +34,7 @@ from cloud_service_enum.gcp.services.vertexai import VertexAiService
 from cloud_service_enum.gcp.services.vpc import VpcService
 
 _SERVICES = [
+    AppEngineService,
     ArtifactRegistryService,
     BigQueryService,
     BinaryAuthorizationService,

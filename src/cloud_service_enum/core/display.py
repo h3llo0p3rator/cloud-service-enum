@@ -45,6 +45,7 @@ _PREFERRED_COLUMNS: tuple[str, ...] = (
 # Per-kind column overrides when the default id/name-first layout is noisy.
 _KIND_COLUMNS: dict[str, tuple[str, ...]] = {
     "gcr-image": ("kind", "name", "tag", "host"),
+    "version": ("kind", "name", "service", "runtime", "serving_status", "version_url"),
 }
 # Fields that are always in the JSON report but add little in a terminal table.
 _NOISY_FIELDS: frozenset[str] = frozenset(
@@ -81,6 +82,11 @@ _DETAIL_ONLY_FIELDS: frozenset[str] = frozenset(
         "extensions",
         "tags",
         "images",
+        "traffic_split",
+        "handlers",
+        "instances",
+        "inbound_services",
+        "network",
     }
 )
 _MAX_EXTRA_COLUMNS = 4
