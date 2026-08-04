@@ -28,7 +28,7 @@ judgement. It just reads, organises, and prints — extremely fast.
 ```text
 [ AWS ]   34 services   ▸  parallel walk across every region
 [ Azure ] 33 services   ▸  ARM + Microsoft Graph in one run
-[ GCP ]   25 services   ▸  with service-account impersonation map
+[ GCP ]   26 services   ▸  with service-account impersonation map
 [ OSINT ] 1 module      ▸  no creds required
 ```
 
@@ -37,7 +37,7 @@ judgement. It just reads, organises, and prints — extremely fast.
 ## What it actually does
 
 For each provider, `cse` ships a registry of small, focused enumerators
-(34 for AWS, 33 for Azure, 25 for GCP, plus an OSINT module). Every
+(34 for AWS, 33 for Azure, 26 for GCP, plus an OSINT module). Every
 enumerator is fully async and runs concurrently inside a single
 `asyncio` event loop, so a full account walk that would take a CLI
 script five minutes typically completes in under thirty seconds.

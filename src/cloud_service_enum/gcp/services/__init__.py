@@ -15,6 +15,7 @@ from cloud_service_enum.gcp.services.cloudsql import CloudSqlService
 from cloud_service_enum.gcp.services.compute import ComputeService
 from cloud_service_enum.gcp.services.dns import DnsService
 from cloud_service_enum.gcp.services.firestore import FirestoreService
+from cloud_service_enum.gcp.services.gcr import GcrService
 from cloud_service_enum.gcp.services.gke import GkeService
 from cloud_service_enum.gcp.services.iam import IamService
 from cloud_service_enum.gcp.services.iap import IapService
@@ -42,6 +43,7 @@ _SERVICES = [
     ComputeService,
     DnsService,
     FirestoreService,
+    GcrService,
     GkeService,
     IamService,
     IapService,
