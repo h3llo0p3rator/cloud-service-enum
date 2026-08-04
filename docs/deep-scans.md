@@ -112,6 +112,7 @@ without opening a second terminal. Covered services include
 
 | Service | Extra fields fetched in deep mode |
 |---------|------------------------------------|
+| `artifactregistry` | Per Docker repository: `images` (uri, tags, digest, size, upload time, media type) plus repo `role_bindings`. Non-Docker formats stay as repository inventory only. |
 | `iam` | Custom-role `policy_document`. Every service-account resource also gets its own `get_iam_policy` fetch: the resulting bindings are attached as `role_bindings` and summarised as an `impersonators` column (e.g. `tokenCreator(2)+user(1)`). Any principal holding `roles/iam.serviceAccountTokenCreator`, `roles/iam.serviceAccountUser`, `roles/iam.workloadIdentityUser`, `roles/iam.serviceAccountKeyAdmin`, `roles/iam.serviceAccountAdmin` or `roles/owner` on the SA is flagged because it represents an impersonation / privilege-escalation path. The project-level field `cis_fields.per_project[project].impersonable_service_accounts` counts at-risk SAs. |
 | `project` | Project `role_bindings` table. |
 | `storage` | GCS object secret scan (mirrors S3) + bucket `role_bindings` + optional object downloads into `loot/<bucket>/...` when `--download` is enabled on `cse gcp enumerate --service storage`. |

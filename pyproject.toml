@@ -84,6 +84,7 @@ gcp = [
     "google-cloud-storage>=3.0",
     "google-cloud-compute>=1.27",
     "google-cloud-container>=2.50",
+    "google-cloud-artifact-registry>=1.16",
     "google-cloud-bigquery>=3.30",
     "google-cloud-kms>=3.4",
     "google-cloud-secret-manager>=2.23",
