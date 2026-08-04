@@ -479,6 +479,10 @@ cse azure mfa \
 # Project is auto-detected from the service-account JSON if you omit --project
 cse gcp enumerate --service-account-file ./sa.json
 
+# Metadata / pre-minted access token (no refresh — validated via tokeninfo)
+cse gcp enumerate --access-token "$TOKEN"
+cse gcp enumerate --access-token "$TOKEN" --project my-project
+
 # Focused IAM walk: dumps service-account impersonation paths and custom roles
 cse gcp enumerate --service-account-file ./sa.json --service iam
 

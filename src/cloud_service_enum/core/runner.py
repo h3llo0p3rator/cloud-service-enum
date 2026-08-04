@@ -53,6 +53,21 @@ async def run_provider(
         except Exception:  # noqa: BLE001
             pass
 
+    if provider is Provider.GCP and not scope.project_ids:
+        try:
+            from cloud_service_enum.gcp.auth import GcpAuthenticator
+
+            if isinstance(auth, GcpAuthenticator):
+                if auth.config.project_id:
+                    scope.project_ids = [auth.config.project_id]
+                else:
+                    discovered = await auth.discover_projects()
+                    if discovered:
+                        scope.project_ids = discovered
+                        extras["Discovered projects"] = str(len(discovered))
+        except Exception:  # noqa: BLE001
+            pass
+
     render_identity(console, identity)
     render_config(console, provider, scope, extras=extras or None)
 

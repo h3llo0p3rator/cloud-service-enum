@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from google.auth import default as adc_default
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
@@ -16,6 +17,7 @@ from cloud_service_enum.core.auth import CloudAuthenticator, IdentitySummary
 from cloud_service_enum.core.errors import AuthenticationError
 
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
 
 @dataclass
@@ -73,7 +75,16 @@ class GcpAuthenticator(CloudAuthenticator):
                 cfg.project_id = info["project_id"]
             return creds, info.get("client_email")
         if cfg.access_token:
-            return UserCredentials(token=cfg.access_token, scopes=[SCOPE]), None
+            # Pre-minted tokens (metadata API, gcloud print-access-token, etc.)
+            # cannot be refreshed — do not attach refresh fields or scopes that
+            # would push google-auth into a refresh path.
+            return (
+                UserCredentials(
+                    token=cfg.access_token,
+                    quota_project_id=cfg.quota_project or cfg.project_id,
+                ),
+                None,
+            )
         if cfg.impersonate_service_account:
             from google.auth import impersonated_credentials
             source, _ = adc_default(scopes=[SCOPE])
@@ -86,6 +97,24 @@ class GcpAuthenticator(CloudAuthenticator):
         creds, project = adc_default(scopes=[SCOPE])
         return creds, f"ADC (project={project})"
 
+    @staticmethod
+    def _introspect_access_token(token: str) -> dict[str, Any]:
+        """Validate a bearer token via Google's tokeninfo endpoint."""
+        try:
+            resp = httpx.get(
+                _TOKENINFO_URL,
+                params={"access_token": token},
+                timeout=15.0,
+            )
+        except httpx.HTTPError as exc:
+            raise AuthenticationError(f"failed to validate GCP access token: {exc}") from exc
+        if resp.status_code != 200:
+            detail = resp.text.strip() or resp.reason_phrase
+            raise AuthenticationError(
+                f"GCP access token rejected by tokeninfo ({resp.status_code}): {detail}"
+            )
+        return resp.json()
+
     async def credentials(self) -> Any:
         if self._credentials is None:
             self._credentials, self._principal = await asyncio.to_thread(self._build)
@@ -94,7 +123,19 @@ class GcpAuthenticator(CloudAuthenticator):
     async def test(self) -> IdentitySummary:
         try:
             creds = await self.credentials()
-            await asyncio.to_thread(creds.refresh, Request())
+            if self.config.method == "access-token":
+                info = await asyncio.to_thread(
+                    self._introspect_access_token, self.config.access_token or ""
+                )
+                self._principal = (
+                    info.get("email")
+                    or info.get("sub")
+                    or "access-token"
+                )
+            else:
+                await asyncio.to_thread(creds.refresh, Request())
+        except AuthenticationError:
+            raise
         except Exception as exc:
             raise AuthenticationError(f"failed to refresh GCP credentials: {exc}") from exc
 
@@ -105,6 +146,35 @@ class GcpAuthenticator(CloudAuthenticator):
             tenant_or_account=self.config.project_id or self.config.quota_project,
             auth_method=self.config.method,
         )
+
+    async def discover_projects(self) -> list[str]:
+        """List active project ids visible to the credential.
+
+        Used by :func:`run_provider` when the caller did not pass
+        ``--project`` / ``--projects``. Returns an empty list on failure.
+        """
+        try:
+            from google.cloud import resourcemanager_v3
+        except ImportError:
+            return []
+
+        creds = await self.credentials()
+
+        def _list() -> list[str]:
+            client = resourcemanager_v3.ProjectsClient(credentials=creds)
+            out: list[str] = []
+            for project in client.search_projects():
+                state = getattr(project.state, "name", str(project.state)).upper()
+                if "DELETE" in state:
+                    continue
+                if project.project_id:
+                    out.append(project.project_id)
+            return out
+
+        try:
+            return await asyncio.to_thread(_list)
+        except Exception:  # noqa: BLE001
+            return []
 
     async def close(self) -> None:
         self._credentials = None
